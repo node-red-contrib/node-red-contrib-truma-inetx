@@ -28,7 +28,7 @@ export interface CollectedSettings {
 }
 
 export interface SettingsJson {
-  topics: Record<string, Record<string, JsonValue>>;
+  topics: Record<string, SettingsTopicJson>;
   topicLists: string[];
   diagnostics: {
     topicGroups: Record<string, string[]>;
@@ -36,6 +36,12 @@ export interface SettingsJson {
     deviceGroups: string[];
     unreadDeviceGroups: string[];
   };
+}
+
+export interface SettingsTopicJson {
+  group?: string;
+  groups?: string[];
+  parameters: Record<string, JsonValue>;
 }
 
 const SENSITIVE_PARAMETERS = new Set(['CertThumb', 'Muid', 'SerialNr', 'UniqueID', 'UserName', 'Uuid']);
@@ -93,9 +99,14 @@ export function settingsToJson({ settings, topicLists, deviceGroups, topicGroups
   const topics: SettingsJson['topics'] = {};
 
   for (const [topicName, params] of settings.entries()) {
-    topics[topicName] = {};
+    const groups = topicGroups.get(topicName) ?? [];
+    topics[topicName] = {
+      ...(groups.length === 1 ? { group: formatDeviceGroup(groups[0]) } : {}),
+      ...(groups.length > 1 ? { groups: groups.map(formatDeviceGroup) } : {}),
+      parameters: {}
+    };
     for (const [parameterName, parameter] of params.entries()) {
-      topics[topicName][parameterName] = sanitizeJsonObject(
+      topics[topicName].parameters[parameterName] = sanitizeJsonObject(
         { ...parameter, v: maybeRedact(parameter.v, parameterName, redact) },
         redact
       );
@@ -156,9 +167,19 @@ function sanitizeJsonObject(value: unknown, redact: boolean): JsonValue {
 
   const output: Record<string, JsonValue> = {};
   for (const [key, item] of Object.entries(value)) {
-    output[key] = sanitizeJsonObject(key === 'v' && typeof value.pn === 'string' ? maybeRedact(item, value.pn, redact) : item, redact);
+    if (key === 'tn' || key === 'pn') continue;
+    const outputKey = normalizeJsonKey(key);
+    output[outputKey] = sanitizeJsonObject(key === 'v' && typeof value.pn === 'string' ? maybeRedact(item, value.pn, redact) : item, redact);
   }
   return output;
+}
+
+function normalizeJsonKey(key: string): string {
+  if (key === 'v') return 'value';
+  if (key === 'avail' || key === 'a') return 'available';
+  if (key === 'perm') return 'permission';
+  if (key === 'n') return 'name';
+  return key;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

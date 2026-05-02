@@ -45,6 +45,9 @@ const DEFAULT_TIMINGS = {
   responseIdleMs: 700,
   readyTimeoutMs: 1500,
   acceptedTimeoutMs: 1500,
+  clientAddressTimeoutMs: 1500,
+  writeConfirmationTimeoutMs: 1500,
+  handshakeSettleMs: 120,
   interleavedResponseSettleMs: 80,
   pipelineSettleMs: 0,
   finalDrainMs: 2500
@@ -129,19 +132,35 @@ export class TrumaProtocol {
     }
   }
 
+  async initializeClientAddress() {
+    await this.start();
+
+    const request = READ_SEQUENCE[0];
+    if (!request.hex && !request.build) throw new Error('Protocol-version request does not define a payload.');
+    const payload = request.build ? request.build() : Buffer.from(request.hex || '', 'hex');
+    this.log(`Sending ${request.name} (${payload.length} bytes)`);
+    await this.sendFrame(payload, request);
+    await this.waitForClientAddress(this.timings.clientAddressTimeoutMs);
+    await delay(this.timings.handshakeSettleMs);
+    await this.drainPendingResponseBeforeNextPayload();
+    this.clearCollectedResponses();
+  }
+
   async writeParameter({ targetGroup, topicName, parameterName, value }: WriteParameterRequest) {
     await this.start();
 
+    const responseStartIndex = this.responseBuffers.length;
     const payload = buildParameterWriteFrame(targetGroup, topicName, parameterName, value);
     await this.sendFrame(payload, {
       name: `set-${topicName}-${parameterName}`,
       addressMode: 'source-client'
     });
 
-    await delay(this.timings.finalDrainMs);
-    await this.drainPendingResponseAtEnd();
+    await this.waitForParameterResponse(topicName, parameterName, responseStartIndex, this.timings.writeConfirmationTimeoutMs);
     await this.flushCurrentResponse();
-    return this.getResponseBuffers();
+    const responses = this.getResponseBuffers().slice(responseStartIndex);
+    const matchingResponses = responses.filter((response) => responseMatchesParameter(response, topicName, parameterName));
+    return matchingResponses.length ? matchingResponses : responses;
   }
 
   async sendFrame(payload: Buffer, request: ReadRequest = { name: '<anonymous>' }) {
@@ -346,6 +365,11 @@ export class TrumaProtocol {
     return responses;
   }
 
+  clearCollectedResponses() {
+    this.responseBuffers.length = 0;
+    this.currentChunks = [];
+  }
+
   close() {
     this.clearIdleTimer();
     const resolvers = this.idleResolvers.splice(0);
@@ -394,6 +418,23 @@ export class TrumaProtocol {
     });
   }
 
+  async waitForClientAddress(timeoutMs: number): Promise<void> {
+    const startedAt = Date.now();
+    while (this.clientAddress === null) {
+      if (Date.now() - startedAt >= timeoutMs) throw new Error(`Timed out after ${timeoutMs}ms waiting for assigned Truma client address.`);
+      await delay(25);
+    }
+  }
+
+  async waitForParameterResponse(topicName: string, parameterName: string, startIndex: number, timeoutMs: number): Promise<void> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (this.getResponseBuffers().slice(startIndex).some((response) => responseMatchesParameter(response, topicName, parameterName))) return;
+      await delay(25);
+    }
+    this.log(`Timed out after ${timeoutMs}ms waiting for confirmation of ${topicName}.${parameterName}; returning collected write responses.`);
+  }
+
   resolveControlWaiters(hex: string) {
     const waiters = this.controlWaiters.slice();
     for (const waiter of waiters) {
@@ -424,6 +465,21 @@ function expectedTrumaFrameLength(data: Buffer): number | null {
   // The captured iNet X app traffic considers a response frame complete once
   // the declared body length plus the short transport prefix has arrived.
   return declaredBodyLength + 3;
+}
+
+function responseMatchesParameter(response: Buffer, topicName: string, parameterName: string): boolean {
+  const decoded = decodeFirstCbor(response);
+  const candidate = Array.isArray(decoded) && decoded.length >= 2 ? decoded[1] : decoded;
+
+  if (isRecord(candidate) && candidate.tn === topicName && candidate.pn === parameterName) return true;
+  if (isRecord(candidate) && Array.isArray(candidate.topics)) {
+    return candidate.topics.some((topic) => {
+      if (!isRecord(topic) || topic.tn !== topicName || !Array.isArray(topic.parameters)) return false;
+      return topic.parameters.some((parameter) => isRecord(parameter) && parameter.pn === parameterName);
+    });
+  }
+
+  return false;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

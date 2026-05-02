@@ -1,4 +1,7 @@
+import { readFile } from 'node:fs/promises';
+
 import { discoverTrumaTopology, readTrumaSettings, setTrumaParameter, shutdownBluetooth } from './index.js';
+import type { SettingsJson } from './settings.js';
 import type { TrumaValue } from './truma-frame.js';
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
@@ -25,14 +28,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 }
 
-function runCommand(command: string, args: string[], logger: ((message: string) => void) | undefined) {
+async function runCommand(command: string, args: string[], logger: ((message: string) => void) | undefined) {
   if (command === 'discover') return discoverTrumaTopology({ connectRetries: 3, logger });
   if (command === 'set') {
     const options = parseSetOptions(args);
+    const tree = options.treePath ? await loadSettingsTree(options.treePath) : null;
+    const targetGroup = options.group ?? inferSingleTopicGroup(tree, options.topic);
     return setTrumaParameter({
       connectRetries: 3,
       logger,
-      targetGroup: options.group,
+      targetGroup,
       topic: options.topic,
       parameter: options.parameter,
       value: options.value
@@ -40,21 +45,26 @@ function runCommand(command: string, args: string[], logger: ((message: string) 
   }
 
   const options = parseReadOptions(args);
+  const tree = options.treePath ? await loadSettingsTree(options.treePath) : null;
+  const topics = options.topics ?? [];
+  const groups = options.groups ?? (tree ? inferReadGroups(tree, topics) : undefined);
   return readTrumaSettings({
     connectRetries: 3,
     logger,
     topics: options.topics,
-    groups: options.groups
+    groups
   });
 }
 
 interface ReadCliOptions {
   topics?: string[];
   groups?: number[];
+  treePath?: string;
 }
 
 interface SetCliOptions {
-  group: number;
+  group?: number;
+  treePath?: string;
   topic: string;
   parameter: string;
   value: TrumaValue;
@@ -63,6 +73,7 @@ interface SetCliOptions {
 function parseReadOptions(args: string[]): ReadCliOptions {
   const topics: string[] = [];
   const groups: number[] = [];
+  let treePath: string | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -100,12 +111,22 @@ function parseReadOptions(args: string[]): ReadCliOptions {
       groups.push(...splitGroups(arg.slice('--group='.length)));
       continue;
     }
+    if (arg === '--tree') {
+      treePath = parseRequiredText(args[index + 1], arg);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--tree=')) {
+      treePath = parseRequiredText(arg.slice('--tree='.length), arg);
+      continue;
+    }
     throw new Error(`Unknown read option: ${arg}`);
   }
 
   return {
     ...(topics.length ? { topics: [...new Set(topics)] } : {}),
-    ...(groups.length ? { groups: [...new Set(groups)] } : {})
+    ...(groups.length ? { groups: [...new Set(groups)] } : {}),
+    ...(treePath ? { treePath } : {})
   };
 }
 
@@ -126,6 +147,7 @@ function splitGroups(value: string): number[] {
 
 function parseSetOptions(args: string[]): SetCliOptions {
   let group: number | undefined;
+  let treePath: string | undefined;
   let topic: string | undefined;
   let parameter: string | undefined;
   let value: TrumaValue | undefined;
@@ -144,6 +166,15 @@ function parseSetOptions(args: string[]): SetCliOptions {
     }
     if (arg.startsWith('--group=')) {
       group = parseGroup(arg.slice('--group='.length));
+      continue;
+    }
+    if (arg === '--tree') {
+      treePath = parseRequiredText(args[index + 1], arg);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--tree=')) {
+      treePath = parseRequiredText(arg.slice('--tree='.length), arg);
       continue;
     }
     if (arg === '--topic') {
@@ -180,12 +211,12 @@ function parseSetOptions(args: string[]): SetCliOptions {
     throw new Error(`Unknown set option: ${arg}`);
   }
 
-  if (group === undefined) throw new Error('set requires --group.');
+  if (group === undefined && !treePath) throw new Error('set requires --group or --tree.');
   if (!topic) throw new Error('set requires --topic.');
   if (!parameter) throw new Error('set requires --param.');
   if (value === undefined) throw new Error('set requires --value.');
 
-  return { group, topic, parameter, value };
+  return { group, treePath, topic, parameter, value };
 }
 
 function parseRequiredGroup(value: string | undefined, option: string): number {
@@ -216,6 +247,65 @@ function parseGroup(value: string): number {
   return Number.parseInt(normalized, 16);
 }
 
+async function loadSettingsTree(path: string): Promise<SettingsJson> {
+  const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+  if (!isRecord(parsed) || !isRecord(parsed.topics)) throw new Error(`Invalid Truma settings tree: ${path}`);
+  return parsed as unknown as SettingsJson;
+}
+
+function inferReadGroups(tree: SettingsJson, selectedTopics: string[]): number[] {
+  const topicNames = selectedTopics.length ? selectedTopics : Object.keys(tree.topics);
+  const groups = new Set<number>();
+
+  for (const topicName of topicNames) {
+    for (const group of readTopicGroups(tree, topicName)) groups.add(group);
+  }
+
+  if (!groups.size) throw new Error('Could not infer any device groups from the settings tree.');
+  return [...groups].sort((left, right) => left - right);
+}
+
+function inferSingleTopicGroup(tree: SettingsJson | null, topicName: string): number {
+  if (!tree) throw new Error(`set requires --group when no --tree is provided.`);
+  const groups = readTopicGroups(tree, topicName);
+  if (groups.length === 0) throw new Error(`Could not infer a group for topic ${topicName} from the settings tree.`);
+  if (groups.length > 1) {
+    throw new Error(`Topic ${topicName} has multiple groups (${groups.map(formatGroup).join(', ')}); pass --group explicitly.`);
+  }
+  return groups[0];
+}
+
+function readTopicGroups(tree: SettingsJson, topicName: string): number[] {
+  const topic = tree.topics[topicName];
+  const groups = new Set<number>();
+
+  if (isRecord(topic)) {
+    if (typeof topic.group === 'string') groups.add(parseGroup(topic.group));
+    if (Array.isArray(topic.groups)) {
+      for (const group of topic.groups) {
+        if (typeof group === 'string') groups.add(parseGroup(group));
+      }
+    }
+  }
+
+  const diagnosticGroups = tree.diagnostics?.topicGroups?.[topicName];
+  if (Array.isArray(diagnosticGroups)) {
+    for (const group of diagnosticGroups) {
+      if (typeof group === 'string') groups.add(parseGroup(group));
+    }
+  }
+
+  return [...groups].sort((left, right) => left - right);
+}
+
+function formatGroup(group: number): string {
+  return `0x${group.toString(16).padStart(4, '0')}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 function writeStdout(value: string): Promise<void> {
   return new Promise((resolve, reject) => {
     process.stdout.write(value, (error) => (error ? reject(error) : resolve()));
@@ -241,13 +331,16 @@ function printHelp(): void {
   truma-inetx read --topics System,PowerSupply
   truma-inetx read --group 0201
   truma-inetx read --topic EnergySrc --group 0201
+  truma-inetx read --tree truma-tree.json --topic Switches
   truma-inetx read --topic BluetoothDevice
+  truma-inetx set --tree truma-tree.json --topic Switches --param ExternalLights --value 1
   truma-inetx set --group 0405 --topic Switches --param ExternalLights --value 1
 
 Reads Truma iNet X settings over BLE and prints one JSON document to stdout.
-Use discover to list advertised topic names and device groups without reading group parameter payloads.
+Use discover to build a reusable settings tree with topic group ids.
 Use --group to read only explicit device groups. --topic only registers/filters topic names; it does not infer groups.
-Use set with an explicit device group, topic, parameter, and value. Switch values use 1/0.
+Use --tree to infer groups for read/set from a previous discover JSON.
+Use set with an explicit or tree-inferred device group, topic, parameter, and value. Switch values use 1/0.
 
 Set TRUMA_DEBUG=1 to print BLE/protocol diagnostics to stderr.
 `);

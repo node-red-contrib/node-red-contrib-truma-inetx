@@ -148,3 +148,4 @@ analysis/*.txt
 analysis/*.md
 output/
 dist/
+truma-tree*.json

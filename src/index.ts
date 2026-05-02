@@ -1,19 +1,19 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { connectToTruma, disconnectQuietly, readSoftwareRevision, shutdownBluetooth, type ConnectOptions } from './ble.js';
-import { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, TRUMA } from './constants.js';
+import { buildGroupReadSequence, buildTopicReadSequence, READ_SEQUENCE } from './constants.js';
 import { TrumaProtocol, type ReadRequest, type TrumaProtocolOptions } from './protocol.js';
 import { parseSettingsJson, type SettingsJson } from './settings.js';
 import { decodeFirstCbor, type TrumaValue } from './truma-frame.js';
 
 export { connectToTruma, disconnectQuietly, isTrumaPeripheral, readSoftwareRevision, shutdownBluetooth } from './ble.js';
-export { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, TRUMA };
+export { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, READ_SEQUENCE, TRUMA } from './constants.js';
 export { TrumaProtocol };
 export { buildParameterWriteFrame, buildTrumaFrame, decodeFirstCbor, decodeTrumaFrame, findCborOffset, parseTrumaHeader } from './truma-frame.js';
 export { collectSettings, parseSettingsJson, settingsToJson } from './settings.js';
 export type { ConnectOptions, TrumaSession } from './ble.js';
 export type { TrumaCharacteristic, TrumaCharacteristics, TrumaProtocolOptions } from './protocol.js';
-export type { CollectedSettings, JsonValue, SettingsJson, TrumaParameter, TrumaTopic } from './settings.js';
+export type { CollectedSettings, JsonValue, SettingsJson, SettingsTopicJson, TrumaParameter, TrumaTopic } from './settings.js';
 export type { TrumaFrame, TrumaFrameHeader, TrumaValue } from './truma-frame.js';
 
 export interface ReadTrumaSettingsOptions extends ConnectOptions {
@@ -23,11 +23,6 @@ export interface ReadTrumaSettingsOptions extends ConnectOptions {
   topics?: string[];
   groups?: number[];
   sequence?: ReadRequest[];
-}
-
-export interface TrumaDiscoveryJson {
-  topics: string[];
-  deviceGroups: string[];
 }
 
 export interface SetTrumaParameterOptions extends ConnectOptions {
@@ -93,10 +88,11 @@ export async function readTrumaSettings({
 
 export async function discoverTrumaTopology({
   protocol,
+  redact = true,
   logger = () => {},
   readRetries = 1,
   ...connectOptions
-}: Omit<ReadTrumaSettingsOptions, 'redact' | 'topics' | 'groups' | 'sequence'> = {}): Promise<TrumaDiscoveryJson> {
+}: Omit<ReadTrumaSettingsOptions, 'topics' | 'groups' | 'sequence'> = {}): Promise<SettingsJson> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= readRetries; attempt += 1) {
@@ -112,15 +108,15 @@ export async function discoverTrumaTopology({
         ...protocol,
         logger: protocol?.logger ?? logger
       });
-      const responses = await trumaProtocol.readAll({ sequence: DISCOVERY_SEQUENCE });
-      return parseDiscovery(responses, logger);
+      const responses = await trumaProtocol.readAll({ sequence: READ_SEQUENCE });
+      return parseAndLogSettings(responses, { logger, redact });
     } catch (error) {
       lastError = error;
       logger(`Discovery attempt ${attempt} failed: ${errorMessage(error)}.`);
       const partialResponses = trumaProtocol?.getResponseBuffers() ?? [];
       if (partialResponses.length > 0) {
         logger(`Returning partial discovery from ${partialResponses.length} collected response payload(s).`);
-        return parseDiscovery(partialResponses, logger);
+        return parseAndLogSettings(partialResponses, { logger, redact });
       }
       if (attempt >= readRetries || !isRetryableReadError(error)) throw error;
       logger('Disconnecting and retrying the full BLE/protocol session.');
@@ -162,8 +158,8 @@ export async function setTrumaParameter({
         logger: protocol?.logger ?? logger
       });
 
-      logger(`Priming topic ${topic} from device group ${formatDeviceGroup(targetGroup)} before writing.`);
-      await trumaProtocol.readAll({ sequence: buildGroupReadSequence([targetGroup], [topic]) });
+      logger('Initializing protocol and learning assigned client address before writing.');
+      await trumaProtocol.initializeClientAddress();
       logger(`Writing ${topic}.${parameter}=${summarizeDecoded(value)} to ${formatDeviceGroup(targetGroup)}.`);
       const responses = await trumaProtocol.writeParameter({
         targetGroup,
@@ -213,34 +209,6 @@ function parseAndLogSettings(
     logger('No settings were decoded. This usually means the protocol only received handshake/empty responses, not the device-list or group payloads.');
   }
   return settings;
-}
-
-function parseDiscovery(responses: Buffer[], logger: NonNullable<ConnectOptions['logger']>): TrumaDiscoveryJson {
-  logger(`Collected ${responses.length} discovery response payload(s).`);
-  logResponseDiagnostics(responses, logger);
-  const settings = parseSettingsJson(responses, { redact: false });
-  const discovery = {
-    topics: settings.topicLists,
-    deviceGroups: collectDeviceGroups(responses)
-  };
-  logger(`Discovered ${discovery.topics.length} topic(s) and ${discovery.deviceGroups.length} device group(s).`);
-  return discovery;
-}
-
-function collectDeviceGroups(responses: Buffer[]): string[] {
-  const groups = new Set<number>();
-
-  for (const response of responses) {
-    const decoded = decodeFirstCbor(response);
-    const body = Array.isArray(decoded) && decoded.length >= 2 ? decoded[1] : decoded;
-    if (!isRecord(body) || !Array.isArray(body.Devices)) continue;
-
-    for (const value of body.Devices) {
-      if (Number.isInteger(value) && value >= 0 && value <= 0xffff) groups.add(value);
-    }
-  }
-
-  return [...groups].sort((left, right) => left - right).map(formatDeviceGroup);
 }
 
 function filterSettingsToTopics(settings: SettingsJson, topics: string[] | undefined): SettingsJson {

@@ -24,15 +24,48 @@ Read settings:
 npm run read
 ```
 
+Build a reusable settings tree:
+
+```sh
+npm run discover > truma-tree.json
+```
+
+The tree includes topic group ids, so later reads and writes can target only the
+needed device groups:
+
+```sh
+npm run read -- --tree truma-tree.json --topic Switches
+```
+
+Tree topics are grouped by topic name, then parameter name:
+
+```json
+{
+  "topics": {
+    "Switches": {
+      "group": "0x0405",
+      "parameters": {
+        "ExternalLights": {
+          "type": 104,
+          "available": 1,
+          "value": 1
+        }
+      }
+    }
+  }
+}
+```
+
 Set a parameter:
 
 ```sh
-npm run set -- --group 0405 --topic Switches --param ExternalLights --value 1
+npm run set -- --tree truma-tree.json --topic Switches --param ExternalLights --value 1
 ```
 
-The write path primes the selected group first, then sends a single parameter
-write. Switch captures use numeric `1` and `0` values. Use `npm run discover`
-or read diagnostics to find group ids before writing other topics.
+The write path initializes the Truma protocol to learn the assigned client
+address, then sends a single parameter write. Switch captures use numeric `1`
+and `0` values. You can also pass `--group 0405` explicitly instead of
+`--tree`.
 
 The CLI writes a single JSON document to stdout. It does not write files.
 Generated build output lives in `dist/` and is ignored by git.
@@ -54,7 +87,8 @@ npm test
 Primary exports:
 
 - `readTrumaSettings()` connects, reads, decodes, disconnects, and returns JSON.
-- `setTrumaParameter()` primes one group, writes one parameter, decodes the
+- `discoverTrumaTopology()` builds a reusable settings tree with topic group ids.
+- `setTrumaParameter()` initializes the protocol, writes one parameter, decodes the
   confirmation responses, disconnects, and returns JSON.
 - `TrumaProtocol` handles the app-level control/data frame exchange.
 - `buildTrumaFrame()`, `buildParameterWriteFrame()`, `decodeTrumaFrame()`, and
