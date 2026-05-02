@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { decodeFirstCbor } from './truma-frame.js';
+import { buildParameterWriteFrame, decodeFirstCbor, type TrumaValue } from './truma-frame.js';
 import { READ_SEQUENCE } from './constants.js';
 
 export interface TrumaCharacteristic {
@@ -31,6 +31,13 @@ export interface ReadRequest {
   build?: () => Buffer;
   addressMode?: 'source-client' | 'client-local';
   dynamic?: 'device-groups';
+}
+
+export interface WriteParameterRequest {
+  targetGroup: number;
+  topicName: string;
+  parameterName: string;
+  value: TrumaValue;
 }
 
 const DEFAULT_TIMINGS = {
@@ -120,6 +127,21 @@ export class TrumaProtocol {
     } finally {
       this.clearIdleTimer();
     }
+  }
+
+  async writeParameter({ targetGroup, topicName, parameterName, value }: WriteParameterRequest) {
+    await this.start();
+
+    const payload = buildParameterWriteFrame(targetGroup, topicName, parameterName, value);
+    await this.sendFrame(payload, {
+      name: `set-${topicName}-${parameterName}`,
+      addressMode: 'source-client'
+    });
+
+    await delay(this.timings.finalDrainMs);
+    await this.drainPendingResponseAtEnd();
+    await this.flushCurrentResponse();
+    return this.getResponseBuffers();
   }
 
   async sendFrame(payload: Buffer, request: ReadRequest = { name: '<anonymous>' }) {

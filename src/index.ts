@@ -4,12 +4,12 @@ import { connectToTruma, disconnectQuietly, readSoftwareRevision, shutdownBlueto
 import { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, TRUMA } from './constants.js';
 import { TrumaProtocol, type ReadRequest, type TrumaProtocolOptions } from './protocol.js';
 import { parseSettingsJson, type SettingsJson } from './settings.js';
-import { decodeFirstCbor } from './truma-frame.js';
+import { decodeFirstCbor, type TrumaValue } from './truma-frame.js';
 
 export { connectToTruma, disconnectQuietly, isTrumaPeripheral, readSoftwareRevision, shutdownBluetooth } from './ble.js';
 export { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, TRUMA };
 export { TrumaProtocol };
-export { buildTrumaFrame, decodeFirstCbor, decodeTrumaFrame, findCborOffset, parseTrumaHeader } from './truma-frame.js';
+export { buildParameterWriteFrame, buildTrumaFrame, decodeFirstCbor, decodeTrumaFrame, findCborOffset, parseTrumaHeader } from './truma-frame.js';
 export { collectSettings, parseSettingsJson, settingsToJson } from './settings.js';
 export type { ConnectOptions, TrumaSession } from './ble.js';
 export type { TrumaCharacteristic, TrumaCharacteristics, TrumaProtocolOptions } from './protocol.js';
@@ -28,6 +28,16 @@ export interface ReadTrumaSettingsOptions extends ConnectOptions {
 export interface TrumaDiscoveryJson {
   topics: string[];
   deviceGroups: string[];
+}
+
+export interface SetTrumaParameterOptions extends ConnectOptions {
+  protocol?: TrumaProtocolOptions;
+  redact?: boolean;
+  readRetries?: number;
+  targetGroup: number;
+  topic: string;
+  parameter: string;
+  value: TrumaValue;
 }
 
 export async function readTrumaSettings({
@@ -111,6 +121,64 @@ export async function discoverTrumaTopology({
       if (partialResponses.length > 0) {
         logger(`Returning partial discovery from ${partialResponses.length} collected response payload(s).`);
         return parseDiscovery(partialResponses, logger);
+      }
+      if (attempt >= readRetries || !isRetryableReadError(error)) throw error;
+      logger('Disconnecting and retrying the full BLE/protocol session.');
+    } finally {
+      trumaProtocol?.close();
+      await disconnectQuietly(session.peripheral);
+    }
+
+    await delay(1500);
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+export async function setTrumaParameter({
+  protocol,
+  redact = true,
+  logger = () => {},
+  readRetries = 1,
+  targetGroup,
+  topic,
+  parameter,
+  value,
+  ...connectOptions
+}: SetTrumaParameterOptions): Promise<SettingsJson> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= readRetries; attempt += 1) {
+    logger(`Starting Truma parameter write (attempt ${attempt}/${readRetries}).`);
+    const session = await connectToTruma({ ...connectOptions, logger });
+    let trumaProtocol: TrumaProtocol | null = null;
+
+    try {
+      const softwareRevision = await readSoftwareRevision(session.characteristics);
+      logger(`Software revision: ${softwareRevision || '<not available>'}.`);
+
+      trumaProtocol = new TrumaProtocol(session.characteristics, {
+        ...protocol,
+        logger: protocol?.logger ?? logger
+      });
+
+      logger(`Priming topic ${topic} from device group ${formatDeviceGroup(targetGroup)} before writing.`);
+      await trumaProtocol.readAll({ sequence: buildGroupReadSequence([targetGroup], [topic]) });
+      logger(`Writing ${topic}.${parameter}=${summarizeDecoded(value)} to ${formatDeviceGroup(targetGroup)}.`);
+      const responses = await trumaProtocol.writeParameter({
+        targetGroup,
+        topicName: topic,
+        parameterName: parameter,
+        value
+      });
+      return parseAndLogSettings(responses, { logger, redact, topics: [topic] });
+    } catch (error) {
+      lastError = error;
+      logger(`Write attempt ${attempt} failed: ${errorMessage(error)}.`);
+      const partialResponses = trumaProtocol?.getResponseBuffers() ?? [];
+      if (partialResponses.length > 0) {
+        logger(`Returning partial JSON from ${partialResponses.length} collected response payload(s).`);
+        return parseAndLogSettings(partialResponses, { logger, redact, topics: [topic] });
       }
       if (attempt >= readRetries || !isRetryableReadError(error)) throw error;
       logger('Disconnecting and retrying the full BLE/protocol session.');

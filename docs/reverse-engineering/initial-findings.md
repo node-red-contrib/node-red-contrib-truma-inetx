@@ -109,6 +109,42 @@ Implementation implication: parse `addr` from the protocol-version response and
 rewrite every later frame that has a client/source address field. This was the
 first live milestone that made the Node.js probe read data successfully.
 
+### Parameter Writes
+
+The `switches on off.pklg` capture shows that setting values uses the same
+control/data transport as reads:
+
+1. Write a control announce to the control characteristic:
+   `01 <payload-length-le16>`.
+2. Wait for control notification `81 00`.
+3. Write one Truma data frame to the write characteristic.
+4. Wait for `f0 01` or response progress.
+5. Request pending response payloads with `03 00` and acknowledge them with
+   `f0 01`.
+
+The data frame is a normal Truma frame addressed to the topic's device group.
+The source/client address must be the assigned client address learned from the
+protocol-version response. The operation is `0x0003`, flags are `0x0001`, and
+the CBOR body is a single parameter object:
+
+```js
+{ tn: 'Switches', pn: 'ExternalLights', v: 1 }
+```
+
+Captured switch examples:
+
+| Action | Target group | Topic | Parameter | Value |
+| --- | --- | --- | --- | --- |
+| External lights on | `0x0405` | `Switches` | `ExternalLights` | `1` |
+| External lights off | `0x0405` | `Switches` | `ExternalLights` | `0` |
+| Internal lights on | `0x0405` | `Switches` | `InternalLights` | `1` |
+| Internal lights off | `0x0405` | `Switches` | `InternalLights` | `0` |
+
+The capture also includes `PowerMgmt.PwrMode` writes to group `0x0101` using
+the same `{ tn, pn, v }` body. This strongly suggests temperature, energy
+source, and other writable settings use the same generic parameter-write shape;
+what changes is the target group, parameter name, and value encoding.
+
 ### Discovery Order
 
 The iNet X platform is modular, so a client should not assume a fixed installed

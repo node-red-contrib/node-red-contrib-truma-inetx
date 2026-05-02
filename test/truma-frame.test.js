@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildTrumaFrame, decodeFirstCbor, parseTrumaHeader, TRUMA } from '../dist/index.js';
+import { buildParameterWriteFrame, buildTrumaFrame, decodeFirstCbor, parseTrumaHeader, TRUMA } from '../dist/index.js';
 import { READ_SEQUENCE } from '../dist/constants.js';
 
 test('decodes CBOR from Truma response frame offsets', () => {
@@ -36,4 +36,20 @@ test('builds compact CBOR frames compatible with captured Truma packets', () => 
   assert.equal(frame.includes(Buffer.from('b900', 'hex')), false);
   assert.equal(frame[18], 0xa2);
   assert.equal(TRUMA.advertisedNamePrefix, 'Truma iNetX');
+});
+
+test('builds parameter write frames from captured switch traffic', () => {
+  const frame = buildParameterWriteFrame(0x0405, 'Switches', 'ExternalLights', 1);
+  const header = parseTrumaHeader(frame);
+
+  assert.equal(frame.subarray(0, 4).toString('hex'), '05040000');
+  assert.equal(header.target, 0x0405);
+  assert.equal(header.source, 0x0000);
+  assert.equal(header.operation, 3);
+  assert.equal(header.flags, 0x0001);
+  assert.deepEqual(decodeFirstCbor(frame), {
+    tn: 'Switches',
+    pn: 'ExternalLights',
+    v: 1
+  });
 });

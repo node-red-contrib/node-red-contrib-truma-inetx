@@ -1,6 +1,6 @@
 # node-red-contrib-truma-inetx
 
-TypeScript BLE library and CLI for reading Truma iNet X settings.
+TypeScript BLE library and CLI for reading and writing Truma iNet X settings.
 
 The current implementation connects over BLE with `@abandonware/noble`, speaks
 the Truma iNet X application protocol, decodes CBOR payloads with `cbor-x`, and
@@ -24,6 +24,16 @@ Read settings:
 npm run read
 ```
 
+Set a parameter:
+
+```sh
+npm run set -- --group 0405 --topic Switches --param ExternalLights --value 1
+```
+
+The write path primes the selected group first, then sends a single parameter
+write. Switch captures use numeric `1` and `0` values. Use `npm run discover`
+or read diagnostics to find group ids before writing other topics.
+
 The CLI writes a single JSON document to stdout. It does not write files.
 Generated build output lives in `dist/` and is ignored by git.
 
@@ -44,9 +54,11 @@ npm test
 Primary exports:
 
 - `readTrumaSettings()` connects, reads, decodes, disconnects, and returns JSON.
+- `setTrumaParameter()` primes one group, writes one parameter, decodes the
+  confirmation responses, disconnects, and returns JSON.
 - `TrumaProtocol` handles the app-level control/data frame exchange.
-- `buildTrumaFrame()`, `decodeTrumaFrame()`, and `decodeFirstCbor()` handle
-  Truma frame/CBOR helpers.
+- `buildTrumaFrame()`, `buildParameterWriteFrame()`, `decodeTrumaFrame()`, and
+  `decodeFirstCbor()` handle Truma frame/CBOR helpers.
 - `collectSettings()` and `parseSettingsJson()` normalize topic/parameter
   responses.
 

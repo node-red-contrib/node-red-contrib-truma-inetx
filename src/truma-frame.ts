@@ -45,6 +45,18 @@ export function buildTrumaFrame(addressHex: string, opHex: string, flagsHex: str
   ]);
 }
 
+export function buildParameterWriteFrame(targetGroup: number, topicName: string, parameterName: string, value: TrumaValue): Buffer {
+  assertDeviceGroup(targetGroup);
+  const address = Buffer.alloc(4);
+  address.writeUInt16LE(targetGroup, 0);
+
+  return buildTrumaFrame(address.toString('hex'), '0300', '0100', {
+    tn: topicName,
+    pn: parameterName,
+    v: value
+  });
+}
+
 export function decodeTrumaFrame(buffer: Buffer): TrumaFrame | null {
   const decoded = decodeFirstCbor(buffer);
   if (decoded === null) return null;
@@ -98,5 +110,11 @@ function decodeCborAt(buffer: Buffer, offset: number): unknown | null {
     return decode(buffer.subarray(offset));
   } catch {
     return null;
+  }
+}
+
+function assertDeviceGroup(value: number): void {
+  if (!Number.isInteger(value) || value < 0 || value > 0xffff) {
+    throw new Error(`Invalid Truma device group: ${value}`);
   }
 }
