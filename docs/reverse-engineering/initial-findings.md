@@ -124,8 +124,8 @@ This matches the platform model where heater, air-conditioning, panel, BLE
 management, tanks, and other modules may appear or disappear depending on the
 installation.
 
-The app-level payload after the binary frame header is CBOR-like. Examples from
-the connected trace include:
+The app-level payload after the binary frame header is CBOR. The TypeScript
+library decodes it with `cbor-x`. Examples from the connected trace include:
 
 - Protocol/version request: `{'pv': [5, 1]}`
 - Topic-list request/response containing:

@@ -4,25 +4,36 @@
   "description": "Reverse engineering tools and Node.js BLE probe for Truma iNet X.",
   "type": "module",
   "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "bin": {
     "truma-inetx": "./bin/truma-inetx.js"
   },
   "scripts": {
-    "scan": "node ./bin/truma-inetx.js scan",
-    "pair": "node ./bin/truma-inetx.js pair",
-    "macos:pair": "swift ./macos/TrumaCoreBluetoothProbe.swift",
-    "macos:hold": "swift ./macos/TrumaCoreBluetoothProbe.swift --no-service-filter --require-pairing-state --keep-scanning --hold --timeout 0",
-    "connect": "node ./bin/truma-inetx.js connect",
-    "read": "node ./bin/truma-inetx.js read",
-    "check": "node --check ./bin/truma-inetx.js && node --check ./src/ble.js && node --check ./src/cli.js && node --check ./src/cbor.js && node --check ./src/constants.js && node --check ./src/protocol.js && node --check ./src/settings.js"
+    "build": "tsc -p tsconfig.json",
+    "clean": "tsc -p tsconfig.json --build --clean",
+    "read": "npm run build --silent && node ./bin/truma-inetx.js read",
+    "check": "npm run build",
+    "test": "npm run build && node --test"
   },
   "dependencies": {
-    "@abandonware/noble": "^1.9.2-26"
+    "@abandonware/noble": "^1.9.2-26",
+    "cbor-x": "^1.6.4"
   },
   "overrides": {
     "tar": "^7.5.13"
   },
   "engines": {
     "node": ">=20 <23"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.17",
+    "typescript": "^6.0.3"
   }
 }

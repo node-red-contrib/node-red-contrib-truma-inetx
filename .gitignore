@@ -147,5 +147,4 @@ captures/*.zip
 analysis/*.txt
 analysis/*.md
 output/
-output/*.md
-output/*.json
+dist/

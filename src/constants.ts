@@ -1,3 +1,6 @@
+import { buildTrumaFrame } from './truma-frame.js';
+import type { ReadRequest } from './protocol.js';
+
 export const TRUMA = {
   advertisedNamePrefix: 'Truma iNetX',
   advertisedServiceUuid: 'fc310001f3b211e88eb2f2801f1b9fd1',
@@ -9,7 +12,7 @@ export const TRUMA = {
   softwareRevisionUuid: '2a28'
 };
 
-export const READ_SEQUENCE = [
+export const READ_SEQUENCE: ReadRequest[] = [
   {
     name: 'protocol-version',
     hex: '0000ffff12000100000000000000000001c1a1627076820501'
@@ -65,48 +68,3 @@ export const READ_SEQUENCE = [
     dynamic: 'device-groups'
   }
 ];
-
-function buildTrumaFrame(addressHex, opHex, flagsHex, cborValue) {
-  const cbor = encodeCbor(cborValue);
-  const bodyLength = 1 + 8 + 2 + cbor.length;
-  return Buffer.concat([
-    Buffer.from(addressHex, 'hex'),
-    Buffer.from([bodyLength & 0xff, (bodyLength >> 8) & 0xff]),
-    Buffer.from(opHex, 'hex'),
-    Buffer.alloc(8),
-    Buffer.from(flagsHex, 'hex'),
-    cbor
-  ]);
-}
-
-function encodeCbor(value) {
-  if (typeof value === 'number') return encodeUnsigned(value);
-  if (typeof value === 'string') return encodeString(value);
-  if (Array.isArray(value)) return Buffer.concat([encodeTypeAndLength(4, value.length), ...value.map(encodeCbor)]);
-  if (value && typeof value === 'object') {
-    const entries = Object.entries(value);
-    return Buffer.concat([
-      encodeTypeAndLength(5, entries.length),
-      ...entries.flatMap(([key, item]) => [encodeString(key), encodeCbor(item)])
-    ]);
-  }
-  throw new Error(`Unsupported CBOR value: ${value}`);
-}
-
-function encodeUnsigned(value) {
-  if (!Number.isInteger(value) || value < 0) throw new Error(`Unsupported CBOR number: ${value}`);
-  return encodeTypeAndLength(0, value);
-}
-
-function encodeString(value) {
-  const data = Buffer.from(value, 'utf8');
-  return Buffer.concat([encodeTypeAndLength(3, data.length), data]);
-}
-
-function encodeTypeAndLength(major, length) {
-  const prefix = major << 5;
-  if (length < 24) return Buffer.from([prefix | length]);
-  if (length <= 0xff) return Buffer.from([prefix | 24, length]);
-  if (length <= 0xffff) return Buffer.from([prefix | 25, (length >> 8) & 0xff, length & 0xff]);
-  return Buffer.from([prefix | 26, (length >> 24) & 0xff, (length >> 16) & 0xff, (length >> 8) & 0xff, length & 0xff]);
-}
