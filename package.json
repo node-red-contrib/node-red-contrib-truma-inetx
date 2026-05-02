@@ -1,0 +1,28 @@
+{
+  "name": "node-red-contrib-truma-inetx",
+  "version": "0.0.1",
+  "description": "Reverse engineering tools and Node.js BLE probe for Truma iNet X.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "truma-inetx": "./bin/truma-inetx.js"
+  },
+  "scripts": {
+    "scan": "node ./bin/truma-inetx.js scan",
+    "pair": "node ./bin/truma-inetx.js pair",
+    "macos:pair": "swift ./macos/TrumaCoreBluetoothProbe.swift",
+    "macos:hold": "swift ./macos/TrumaCoreBluetoothProbe.swift --no-service-filter --require-pairing-state --keep-scanning --hold --timeout 0",
+    "connect": "node ./bin/truma-inetx.js connect",
+    "read": "node ./bin/truma-inetx.js read",
+    "check": "node --check ./bin/truma-inetx.js && node --check ./src/ble.js && node --check ./src/cli.js && node --check ./src/cbor.js && node --check ./src/constants.js && node --check ./src/protocol.js && node --check ./src/settings.js"
+  },
+  "dependencies": {
+    "@abandonware/noble": "^1.9.2-26"
+  },
+  "overrides": {
+    "tar": "^7.5.13"
+  },
+  "engines": {
+    "node": ">=20 <23"
+  }
+}
