@@ -68,3 +68,19 @@ export const READ_SEQUENCE: ReadRequest[] = [
     dynamic: 'device-groups'
   }
 ];
+
+export function buildTopicReadSequence(topicNames: string[]): ReadRequest[] {
+  const topics = topicNames.map((name) => name.trim()).filter(Boolean);
+  if (!topics.length) throw new Error('At least one topic name is required.');
+
+  return [
+    READ_SEQUENCE[0],
+    READ_SEQUENCE[2],
+    READ_SEQUENCE[3],
+    {
+      name: `topics-${topics.join('-')}`,
+      addressMode: 'source-client',
+      build: () => buildTrumaFrame('00000005', '0300', '0200', { tn: topics })
+    }
+  ];
+}

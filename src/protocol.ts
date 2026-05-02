@@ -70,7 +70,11 @@ export class TrumaProtocol {
     if (this.isStarted) return;
     this.log('Subscribing to control and data characteristics.');
     this.control.onData((data) => this.handleControlNotification(data));
-    this.data.onData((data) => this.handleDataNotification(data));
+    this.data.onData((data) => {
+      this.handleDataNotification(data).catch((error) => {
+        this.log(`Could not process data notification: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    });
 
     await this.control.subscribe();
     this.log('Control characteristic subscribed.');
@@ -95,26 +99,32 @@ export class TrumaProtocol {
   async readAll({ sequence = READ_SEQUENCE }: { sequence?: ReadRequest[] } = {}) {
     await this.start();
 
-    for (const request of sequence) {
-      if (request.dynamic === 'device-groups') {
-        await this.readDetectedDeviceGroups(request.name);
-        continue;
+    try {
+      for (const request of sequence) {
+        if (request.dynamic === 'device-groups') {
+          await this.readDetectedDeviceGroups(request.name);
+          continue;
+        }
+
+        if (!request.hex && !request.build) throw new Error(`Read request ${request.name} does not define a payload.`);
+        const payload = request.build ? request.build() : Buffer.from(request.hex || '', 'hex');
+        this.log(`Sending ${request.name} (${payload.length} bytes)`);
+        await this.sendFrame(payload, request);
+        await delay(this.timings.pipelineSettleMs);
       }
 
-      if (!request.hex && !request.build) throw new Error(`Read request ${request.name} does not define a payload.`);
-      const payload = request.build ? request.build() : Buffer.from(request.hex || '', 'hex');
-      this.log(`Sending ${request.name} (${payload.length} bytes)`);
-      await this.sendFrame(payload, request);
-      await delay(this.timings.pipelineSettleMs);
+      await delay(this.timings.finalDrainMs);
+      await this.drainPendingResponseAtEnd();
+      await this.flushCurrentResponse();
+      return this.getResponseBuffers();
+    } finally {
+      this.clearIdleTimer();
     }
-
-    await delay(this.timings.finalDrainMs);
-    await this.drainPendingResponseAtEnd();
-    await this.flushCurrentResponse();
-    return this.responseBuffers;
   }
 
   async sendFrame(payload: Buffer, request: ReadRequest = { name: '<anonymous>' }) {
+    const responseCountBeforeWrite = this.responseBuffers.length;
+    const pendingCountBeforeWrite = this.pendingResponseCount;
     const announce = Buffer.from([0x01, payload.length & 0xff, (payload.length >> 8) & 0xff]);
     this.log(`Writing control announce: ${announce.toString('hex')}`);
     const ready = this.waitForControlNotification('8100', this.timings.readyTimeoutMs);
@@ -126,7 +136,16 @@ export class TrumaProtocol {
     this.log(`Writing data frame (${payload.length} bytes): ${payload.toString('hex')}`);
     const accepted = this.waitForControlNotification('f001', this.timings.acceptedTimeoutMs);
     await this.write.write(payload, true);
-    await accepted;
+    try {
+      await accepted;
+    } catch (error) {
+      await this.drainPendingResponseBeforeNextPayload();
+      if (this.hasProgressSince(responseCountBeforeWrite, pendingCountBeforeWrite)) {
+        this.log(`Did not receive f001 for ${request.name}, but response traffic progressed; continuing with collected data.`);
+        return;
+      }
+      throw error;
+    }
     this.log(`Control accepted ${request.name}.`);
   }
 
@@ -154,10 +173,37 @@ export class TrumaProtocol {
     }
   }
 
-  handleDataNotification(data: Buffer) {
+  async handleDataNotification(data: Buffer) {
     this.log(`Data notification (${data.length} bytes): ${data.toString('hex')}`);
+
+    if (!startsTrumaFrame(data) && !this.currentChunks.length && this.responseBuffers.length) {
+      this.responseBuffers[this.responseBuffers.length - 1] = Buffer.concat([this.responseBuffers[this.responseBuffers.length - 1], Buffer.from(data)]);
+      this.log(`Appended trailing data fragment (${data.length} bytes) to previous response.`);
+      return;
+    }
+
+    if (startsTrumaFrame(data) && this.currentChunks.length) {
+      this.log('New response frame started before previous frame was flushed; flushing previous frame first.');
+      await this.flushCurrentResponse();
+    }
+
     this.currentChunks.push(Buffer.from(data));
+    if (this.currentResponseReachedExpectedLength()) {
+      this.log('Response frame reached expected length; flushing immediately.');
+      await this.flushCurrentResponse();
+      return;
+    }
+
     this.bumpIdle();
+  }
+
+  currentResponseReachedExpectedLength() {
+    if (!this.currentChunks.length) return false;
+    const response = Buffer.concat(this.currentChunks);
+    const expectedLength = expectedTrumaFrameLength(response);
+    if (expectedLength === null) return false;
+    this.log(`Response frame progress: ${response.length}/${expectedLength} byte minimum.`);
+    return response.length >= expectedLength;
   }
 
   bumpIdle() {
@@ -259,6 +305,7 @@ export class TrumaProtocol {
 
   async flushCurrentResponse() {
     if (!this.currentChunks.length) return;
+    this.clearIdleTimer();
     const response = Buffer.concat(this.currentChunks);
     this.currentChunks = [];
     this.responseBuffers.push(response);
@@ -269,6 +316,28 @@ export class TrumaProtocol {
     });
     if (this.pendingResponseCount > 0) this.pendingResponseCount -= 1;
     this.log(`Response acknowledged; pending response count is ${this.pendingResponseCount}.`);
+  }
+
+  getResponseBuffers() {
+    const responses = this.responseBuffers.slice();
+    if (this.currentChunks.length) responses.push(Buffer.concat(this.currentChunks));
+    return responses;
+  }
+
+  close() {
+    this.clearIdleTimer();
+    const resolvers = this.idleResolvers.splice(0);
+    for (const resolve of resolvers) resolve();
+  }
+
+  private hasProgressSince(responseCount: number, pendingCount: number) {
+    return this.responseBuffers.length > responseCount || this.currentChunks.length > 0 || this.pendingResponseCount > pendingCount;
+  }
+
+  private clearIdleTimer() {
+    if (!this.idleTimer) return;
+    clearTimeout(this.idleTimer);
+    this.idleTimer = null;
   }
 
   learnClientAddress(response: Buffer) {
@@ -317,6 +386,22 @@ export class TrumaProtocol {
 
 function formatAddress(address: number) {
   return `0x${address.toString(16).padStart(4, '0')}`;
+}
+
+function startsTrumaFrame(data: Buffer): boolean {
+  if (data.length < 18) return false;
+  const operation = data.readUInt16LE(6);
+  return operation === 1 || operation === 2 || operation === 3;
+}
+
+function expectedTrumaFrameLength(data: Buffer): number | null {
+  if (data.length < 6) return null;
+  const declaredBodyLength = data.readUInt16LE(4);
+  if (declaredBodyLength <= 0) return null;
+
+  // The captured iNet X app traffic considers a response frame complete once
+  // the declared body length plus the short transport prefix has arrived.
+  return declaredBodyLength + 3;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
