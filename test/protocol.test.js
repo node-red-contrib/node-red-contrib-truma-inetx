@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildTopicReadSequence, buildTrumaFrame, decodeFirstCbor, TrumaProtocol } from '../dist/index.js';
+import { buildGroupReadSequence, buildTopicReadSequence, buildTrumaFrame, decodeFirstCbor, DISCOVERY_SEQUENCE, TrumaProtocol } from '../dist/index.js';
 
 test('learns assigned client address and rewrites later frame headers', () => {
   const protocol = new TrumaProtocol(fakeCharacteristics());
@@ -45,12 +45,33 @@ test('appends tiny trailing fragments to the previous response', async () => {
 
 test('builds selected-topic read sequence', () => {
   const sequence = buildTopicReadSequence(['System', 'BluetoothDevice']);
-  const selectedTopics = sequence.at(-1);
+  const selectedTopics = sequence[1];
 
   assert.equal(sequence.length, 4);
   assert.equal(selectedTopics.name, 'topics-System-BluetoothDevice');
   assert.equal(selectedTopics.addressMode, 'source-client');
   assert.deepEqual(decodeFirstCbor(selectedTopics.build()), { tn: ['System', 'BluetoothDevice'] });
+});
+
+test('builds explicit group read sequence without topic-to-group assumptions', () => {
+  const sequence = buildGroupReadSequence([0x0501, 0x0201], ['EnergySrc']);
+  const groupReads = sequence.slice(4);
+
+  assert.deepEqual(sequence.map((request) => request.name), [
+    'protocol-version',
+    'topics-EnergySrc',
+    'client-system-time',
+    'client-last-message',
+    'read-group-0201',
+    'read-group-0501'
+  ]);
+  assert.equal(groupReads[0].build().subarray(0, 2).toString('hex'), '0102');
+  assert.equal(groupReads[1].build().subarray(0, 2).toString('hex'), '0105');
+});
+
+test('discovery sequence stops before dynamic group parameter reads', () => {
+  assert.equal(DISCOVERY_SEQUENCE.at(-1).name, 'read-device-list');
+  assert.equal(DISCOVERY_SEQUENCE.some((request) => request.dynamic === 'device-groups'), false);
 });
 
 function fakeCharacteristics() {

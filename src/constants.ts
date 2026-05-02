@@ -69,18 +69,51 @@ export const READ_SEQUENCE: ReadRequest[] = [
   }
 ];
 
+export const DISCOVERY_SEQUENCE: ReadRequest[] = READ_SEQUENCE.filter((request) => request.dynamic !== 'device-groups');
+
 export function buildTopicReadSequence(topicNames: string[]): ReadRequest[] {
-  const topics = topicNames.map((name) => name.trim()).filter(Boolean);
-  if (!topics.length) throw new Error('At least one topic name is required.');
+  return [
+    READ_SEQUENCE[0],
+    buildTopicRegistrationRequest(topicNames),
+    READ_SEQUENCE[2],
+    READ_SEQUENCE[3]
+  ];
+}
+
+export function buildGroupReadSequence(deviceGroups: number[], topicNames: string[] = []): ReadRequest[] {
+  const groups = [...new Set(deviceGroups)].sort((left, right) => left - right);
+  if (!groups.length) throw new Error('At least one device group is required.');
 
   return [
     READ_SEQUENCE[0],
+    ...(topicNames.length ? [buildTopicRegistrationRequest(topicNames)] : []),
     READ_SEQUENCE[2],
     READ_SEQUENCE[3],
-    {
-      name: `topics-${topics.join('-')}`,
-      addressMode: 'source-client',
-      build: () => buildTrumaFrame('00000005', '0300', '0200', { tn: topics })
-    }
+    ...groups.map((deviceGroup) => ({
+      name: `read-group-${formatDeviceGroup(deviceGroup)}`,
+      addressMode: 'source-client' as const,
+      build: () => buildReadGroupFrame(deviceGroup)
+    }))
   ];
+}
+
+function buildTopicRegistrationRequest(topicNames: string[]): ReadRequest {
+  const topics = topicNames.map((name) => name.trim()).filter(Boolean);
+  if (!topics.length) throw new Error('At least one topic name is required.');
+
+  return {
+    name: `topics-${topics.join('-')}`,
+    addressMode: 'source-client',
+    build: () => buildTrumaFrame('00000005', '0300', '0200', { tn: topics })
+  };
+}
+
+function buildReadGroupFrame(deviceGroup: number): Buffer {
+  const payload = Buffer.from('000000050b00030000000000000000000400', 'hex');
+  payload.writeUInt16LE(deviceGroup, 0);
+  return payload;
+}
+
+function formatDeviceGroup(deviceGroup: number): string {
+  return deviceGroup.toString(16).padStart(4, '0');
 }

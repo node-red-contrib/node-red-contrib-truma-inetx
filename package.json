@@ -18,6 +18,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -p tsconfig.json --build --clean",
+    "discover": "npm run build --silent && node ./bin/truma-inetx.js discover",
     "read": "npm run build --silent && node ./bin/truma-inetx.js read",
     "check": "npm run build",
     "test": "npm run build && node --test"
