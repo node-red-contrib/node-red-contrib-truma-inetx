@@ -43,10 +43,12 @@ export interface WriteParameterRequest {
 const DEFAULT_TIMINGS = {
   subscribeSettleMs: 150,
   responseIdleMs: 700,
+  subscribeTimeoutMs: 10000,
   readyTimeoutMs: 1500,
   acceptedTimeoutMs: 1500,
   clientAddressTimeoutMs: 1500,
   writeConfirmationTimeoutMs: 1500,
+  pairingSubscribeTimeoutMs: 10000,
   handshakeSettleMs: 120,
   interleavedResponseSettleMs: 80,
   pipelineSettleMs: 0,
@@ -86,9 +88,9 @@ export class TrumaProtocol {
       });
     });
 
-    await this.control.subscribe();
+    await withTimeout(this.control.subscribe(), this.timings.subscribeTimeoutMs, 'control characteristic subscription');
     this.log('Control characteristic subscribed.');
-    await this.data.subscribe();
+    await withTimeout(this.data.subscribe(), this.timings.subscribeTimeoutMs, 'data characteristic subscription');
     this.log('Data characteristic subscribed.');
     await delay(this.timings.subscribeSettleMs);
     this.log(`Subscription settle complete (${this.timings.subscribeSettleMs}ms).`);
@@ -102,7 +104,7 @@ export class TrumaProtocol {
       this.handleControlNotification(data);
     });
     this.log('Subscribing to protected control characteristic. This should write 01 00 to its CCCD.');
-    await this.control.subscribe();
+    await withTimeout(this.control.subscribe(), this.timings.pairingSubscribeTimeoutMs, 'protected control subscription');
     this.log('Control subscription call completed.');
   }
 
@@ -480,6 +482,25 @@ function responseMatchesParameter(response: Buffer, topicName: string, parameter
   }
 
   return false;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`Timed out after ${timeoutMs}ms during ${label}.`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    );
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

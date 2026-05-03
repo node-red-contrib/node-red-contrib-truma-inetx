@@ -51,6 +51,58 @@ Implementation implication: a probe should reproduce discovery, then attempt to
 write `01 00` to descriptor handle `0x0023`. The OS/BLE stack should then
 surface the normal pairing flow.
 
+The TypeScript CLI exposes this as:
+
+```sh
+npm run pair
+npm run pair -- --hold-ms 30000
+```
+
+Run it while the iNet X display is in Bluetooth pairing mode. The command keeps
+the connection open briefly after the protected subscribe so the operating
+system can finish pairing.
+
+### Venus OS / Victron BlueZ
+
+On Venus OS, the iNet X may pair successfully but later sessions can still look
+like a BLE-level connection only: GATT connects, but the display does not switch
+to the active app connection icon and protocol subscription/read can stall.
+
+The working mitigation is to persist controller settings for Truma's legacy LE
+pairing behavior:
+
+```sh
+npm run victron
+```
+
+This runs the persistent `btmgmt` sequence:
+
+```sh
+power off
+sc off
+io-cap 3
+power on
+```
+
+Unlike the experimental `pair --legacy-pairing` path, this does not restore
+Secure Connections afterwards. It is a pairing/controller preparation command,
+not part of normal `discover` or `read`.
+
+Later Venus testing showed a more important distinction: noble-triggered pairing
+can complete SMP encryption and key exchange in `btmon`, but bluetoothd may not
+create a persistent Truma device folder under
+`/data/var/lib/bluetooth/<adapter>/<device>/info`. Later reconnects then fail
+the protected CCCD write with `Insufficient Encryption (0x0f)`.
+
+The Linux pairing path should therefore use BlueZ D-Bus:
+
+```sh
+npm run pair -- --bluez --legacy-pairing --agent-capability NoInputNoOutput --hold-ms 30000
+```
+
+The goal is to make bluetoothd own the `org.bluez.Device1` object and persist
+the bond keys before noble is used for normal protocol reads/writes.
+
 ## GATT Shape
 
 Observed Truma primary service:
@@ -144,6 +196,23 @@ The capture also includes `PowerMgmt.PwrMode` writes to group `0x0101` using
 the same `{ tn, pn, v }` body. This strongly suggests temperature, energy
 source, and other writable settings use the same generic parameter-write shape;
 what changes is the target group, parameter name, and value encoding.
+
+Additional live tests and `change room temp.pklg` clarified the main control
+topics:
+
+- `Switches` and `WaterHeating` work with the generic parameter-write path.
+- Room heating is split across multiple topics:
+  - `RoomClimate` controls the high-level off/heating/ventilation mode.
+  - `RoomClimate.TgtTemp` is present, but did not control the heater target in
+    the tested capture.
+  - `AirHeating.TgtTemp` controls the room heating target temperature.
+  - `AirHeating.Mode` controls the air-heater mode/fan profile.
+- Temperature values with type `10` are tenths of a degree Celsius. For
+  example, the app writes `AirHeating.TgtTemp = 50`, `100`, and `150` for
+  5°C, 10°C, and 15°C.
+
+See [../control-examples.md](../control-examples.md) for user-facing commands
+and known-good mappings.
 
 ### Discovery Order
 

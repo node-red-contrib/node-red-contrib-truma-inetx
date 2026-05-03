@@ -19,14 +19,17 @@
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -p tsconfig.json --build --clean",
     "discover": "npm run build --silent && node ./bin/truma-inetx.js discover",
+    "pair": "npm run build --silent && node ./bin/truma-inetx.js pair",
     "read": "npm run build --silent && node ./bin/truma-inetx.js read",
     "set": "npm run build --silent && node ./bin/truma-inetx.js set",
+    "victron": "npm run build --silent && node ./bin/truma-inetx.js victron-prepare",
     "check": "npm run build",
     "test": "npm run build && node --test"
   },
   "dependencies": {
     "@abandonware/noble": "^1.9.2-26",
-    "cbor-x": "^1.6.4"
+    "cbor-x": "^1.6.4",
+    "dbus-next": "^0.10.2"
   },
   "overrides": {
     "tar": "^7.5.13"
