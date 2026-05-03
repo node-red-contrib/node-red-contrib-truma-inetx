@@ -1,0 +1,46 @@
+<script type="text/javascript">
+  RED.nodes.registerType('truma-inetx-set', {
+    category: 'Truma',
+    color: '#d8eef8',
+    defaults: {
+      name: { value: '' },
+      device: { type: 'truma-inetx-device', required: true },
+      topic: { value: '', required: true },
+      parameter: { value: '', required: true },
+      value: { value: '' }
+    },
+    inputs: 1,
+    outputs: 1,
+    icon: 'font-awesome/fa-upload',
+    label: function () {
+      return this.name || 'Truma set';
+    }
+  });
+</script>
+
+<script type="text/html" data-template-name="truma-inetx-set">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name">
+  </div>
+  <div class="form-row">
+    <label for="node-input-device"><i class="fa fa-bluetooth"></i> Device</label>
+    <input type="text" id="node-input-device">
+  </div>
+  <div class="form-row">
+    <label for="node-input-topic"><i class="fa fa-folder"></i> Topic</label>
+    <input type="text" id="node-input-topic" placeholder="Switches">
+  </div>
+  <div class="form-row">
+    <label for="node-input-parameter"><i class="fa fa-sliders"></i> Parameter</label>
+    <input type="text" id="node-input-parameter" placeholder="ExternalLights">
+  </div>
+  <div class="form-row">
+    <label for="node-input-value"><i class="fa fa-pencil"></i> Value</label>
+    <input type="text" id="node-input-value" placeholder="1">
+  </div>
+</script>
+
+<script type="text/html" data-help-name="truma-inetx-set">
+  <p>Sets one parameter. Incoming <code>msg.payload</code> may override with <code>{ topic, parameter, value, group }</code>.</p>
+</script>

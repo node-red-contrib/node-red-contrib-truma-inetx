@@ -400,7 +400,13 @@ export class TrumaProtocol {
 
   waitForControlNotification(expectedHex: string, timeoutMs: number): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      let waiter: { expectedHex: string; resolve: () => void };
+      const waiter: { expectedHex: string; resolve: () => void } = {
+        expectedHex,
+        resolve: () => {
+          cleanup();
+          resolve();
+        }
+      };
       const timeout = setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out after ${timeoutMs}ms waiting for control notification ${expectedHex}.`));
@@ -408,13 +414,6 @@ export class TrumaProtocol {
       const cleanup = () => {
         clearTimeout(timeout);
         this.controlWaiters = this.controlWaiters.filter((candidate) => candidate !== waiter);
-      };
-      waiter = {
-        expectedHex,
-        resolve: () => {
-          cleanup();
-          resolve();
-        }
       };
       this.controlWaiters.push(waiter);
     });

@@ -2,33 +2,41 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 
 import nobleModule from '@abandonware/noble';
+import type { NobleCharacteristic, NoblePeripheral } from '@abandonware/noble';
 
 import { TRUMA } from './constants.js';
+import type { BluetoothBackend, BluetoothBackendName, ResolvedConnectOptions } from './ble/backend.js';
 import type { TrumaCharacteristic, TrumaCharacteristics } from './protocol.js';
 
-const noble = (nobleModule as { default?: unknown }).default ?? nobleModule;
+const noble = nobleModule;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15000;
 const DEFAULT_DISCOVER_TIMEOUT_MS = 15000;
 const DEFAULT_CONNECT_RETRIES = 3;
 const RETRY_DELAY_MS = 1200;
 const DISCONNECT_TIMEOUT_MS = 3000;
 
-type Noble = any;
-type Peripheral = any;
-type Characteristic = any;
+type Peripheral = NoblePeripheral;
+type Characteristic = NobleCharacteristic;
 type Logger = (message: string) => void;
 type BluezObjects = Record<string, Record<string, Record<string, unknown>>>;
 type BluezVariantConstructor = new (signature: string, value: unknown) => unknown;
+export type { BluetoothBackendName };
 
 const requireOptional = createRequire(import.meta.url);
 
 export interface TrumaSession {
-  peripheral: Peripheral;
+  peripheral: Peripheral | BluezPeripheral;
   characteristics: TrumaCharacteristics;
 }
 
+interface BluezPeripheral {
+  bluez: true;
+  state: 'connected' | 'disconnected';
+  disconnect(): Promise<void>;
+}
+
 export interface ConnectOptions {
-  backend?: 'noble' | 'bluez';
+  bluetooth?: BluetoothBackendName;
   namePrefix?: string;
   scanServiceUuid?: string | null;
   matchServiceUuid?: string | null;
@@ -42,8 +50,22 @@ export interface ConnectOptions {
 let activePeripheral: Peripheral | null = null;
 let activeBluezSession: TrumaSession | null = null;
 
+const nobleBackend: BluetoothBackend = {
+  name: 'noble',
+  isAvailable: async () => true,
+  connect: connectToTrumaNoble,
+  shutdown: shutdownNoble
+};
+
+const bluezBackend: BluetoothBackend = {
+  name: 'bluez',
+  isAvailable: isBluezAvailable,
+  connect: connectToTrumaBluez,
+  shutdown: shutdownBluez
+};
+
 export async function connectToTruma({
-  backend = 'noble',
+  bluetooth = 'auto',
   namePrefix = TRUMA.advertisedNamePrefix,
   scanServiceUuid = null,
   matchServiceUuid = TRUMA.advertisedServiceUuid,
@@ -53,11 +75,20 @@ export async function connectToTruma({
   connectRetries = DEFAULT_CONNECT_RETRIES,
   logger = () => {}
 }: ConnectOptions = {}): Promise<TrumaSession> {
-  if (backend === 'bluez') {
-    stopScanningSafe();
-    return connectToTrumaBluez({ namePrefix, matchServiceUuid, timeoutMs, connectTimeoutMs, discoverTimeoutMs, logger });
-  }
+  const backend = await selectBluetoothBackend(bluetooth, logger);
+  return backend.connect({ namePrefix, scanServiceUuid, matchServiceUuid, timeoutMs, connectTimeoutMs, discoverTimeoutMs, connectRetries, logger });
+}
 
+async function connectToTrumaNoble({
+  namePrefix,
+  scanServiceUuid,
+  matchServiceUuid,
+  timeoutMs,
+  connectTimeoutMs,
+  discoverTimeoutMs,
+  connectRetries,
+  logger
+}: ResolvedConnectOptions): Promise<TrumaSession> {
   await waitForPoweredOn();
   logger('Bluetooth adapter powered on.');
   logger(`Scan matcher: namePrefix=${namePrefix}, advertisedService=${matchServiceUuid || '<disabled>'}, nobleServiceFilter=${scanServiceUuid || '<none>'}.`);
@@ -105,13 +136,39 @@ export async function connectToTruma({
   };
 }
 
+async function selectBluetoothBackend(bluetooth: BluetoothBackendName, logger: Logger): Promise<BluetoothBackend> {
+  if (bluetooth === 'bluez') return bluezBackend;
+  if (bluetooth === 'noble') return nobleBackend;
+  if (await bluezBackend.isAvailable(logger)) return bluezBackend;
+  return nobleBackend;
+}
+
+export async function isBluezAvailable(logger: Logger = () => {}): Promise<boolean> {
+  if (process.platform !== 'linux') return false;
+  try {
+    const { systemBus } = loadDbusNext();
+    const bus = systemBus();
+    try {
+      const object = await bus.getProxyObject('org.bluez', '/');
+      const objectManager = object.getInterface('org.freedesktop.DBus.ObjectManager') as BluezObjectManager;
+      const objects = await objectManager.GetManagedObjects();
+      return findBluezAdapterPath(objects) !== null;
+    } finally {
+      bus.disconnect();
+    }
+  } catch (error) {
+    logger(`BlueZ backend is not available for auto bluetooth selection: ${errorMessage(error)}.`);
+    return false;
+  }
+}
+
 export async function readSoftwareRevision(characteristics: TrumaCharacteristics): Promise<string | null> {
   if (!characteristics.softwareRevision) return null;
   const value = await characteristics.softwareRevision.read();
   return value.toString('utf8') || null;
 }
 
-export async function disconnectQuietly(peripheral: Peripheral | null | undefined): Promise<void> {
+export async function disconnectQuietly(peripheral: Peripheral | BluezPeripheral | null | undefined): Promise<void> {
   if (isBluezPeripheral(peripheral)) {
     await peripheral.disconnect();
     if (activeBluezSession?.peripheral === peripheral) activeBluezSession = null;
@@ -126,31 +183,38 @@ export async function disconnectQuietly(peripheral: Peripheral | null | undefine
 }
 
 export async function shutdownBluetooth(): Promise<void> {
-  (noble as Noble).removeAllListeners('discover');
+  await Promise.all([nobleBackend.shutdown(), bluezBackend.shutdown()]);
+}
+
+async function shutdownNoble(): Promise<void> {
+  noble.removeAllListeners('discover');
   await stopScanningAndWait();
   await disconnectQuietly(activePeripheral);
-  await disconnectQuietly(activeBluezSession?.peripheral);
   activePeripheral = null;
+}
+
+async function shutdownBluez(): Promise<void> {
+  await disconnectQuietly(activeBluezSession?.peripheral);
   activeBluezSession = null;
 }
 
 async function waitForPoweredOn(): Promise<void> {
-  if ((noble as Noble).state === 'poweredOn') return;
-  if ((noble as Noble).state === 'unsupported' || (noble as Noble).state === 'unauthorized') {
-    throw new Error(`Bluetooth adapter state is ${(noble as Noble).state}.`);
+  if (noble.state === 'poweredOn') return;
+  if (noble.state === 'unsupported' || noble.state === 'unauthorized') {
+    throw new Error(`Bluetooth adapter state is ${noble.state}.`);
   }
 
   return new Promise((resolve, reject) => {
     const onStateChange = (state: string) => {
       if (state === 'poweredOn') {
-        (noble as Noble).removeListener('stateChange', onStateChange);
+        noble.removeListener('stateChange', onStateChange);
         resolve();
       } else if (state === 'unsupported' || state === 'unauthorized') {
-        (noble as Noble).removeListener('stateChange', onStateChange);
+        noble.removeListener('stateChange', onStateChange);
         reject(new Error(`Bluetooth adapter state is ${state}.`));
       }
     };
-    (noble as Noble).on('stateChange', onStateChange);
+    noble.on('stateChange', onStateChange);
   });
 }
 
@@ -211,13 +275,15 @@ function scanAndConnect({
       if (settled) return;
       settled = true;
       clearTimeout(scanTimeout);
-      (noble as Noble).removeListener('discover', onDiscover);
+      noble.removeListener('discover', onDiscover);
       await stopScanningAndWait();
       if (error) {
         if (candidate) await disconnectQuietly(candidate);
         reject(error);
-      } else {
+      } else if (peripheral) {
         resolve(peripheral);
+      } else {
+        reject(new Error('Connect completed without a peripheral.'));
       }
     };
 
@@ -239,7 +305,7 @@ function scanAndConnect({
         .catch((error) => finish(asError(error)).catch(reject));
     };
 
-    (noble as Noble).on('discover', onDiscover);
+    noble.on('discover', onDiscover);
     startScanning(scanServiceUuid, (error?: Error) => {
       if (error) finish(error).catch(reject);
     });
@@ -272,15 +338,7 @@ export function isTrumaPeripheral(
 
 function startScanning(scanServiceUuid: string | null, callback: (error?: Error) => void): void {
   const services = scanServiceUuid ? [scanServiceUuid] : [];
-  (noble as Noble).startScanning(services, true, callback);
-}
-
-function stopScanningSafe(): void {
-  try {
-    (noble as Noble).stopScanning();
-  } catch {
-    // Best effort cleanup only.
-  }
+  noble.startScanning(services, true, callback);
 }
 
 function stopScanningAndWait(): Promise<void> {
@@ -290,12 +348,12 @@ function stopScanningAndWait(): Promise<void> {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      (noble as Noble).removeListener('scanStop', finish);
+      noble.removeListener('scanStop', finish);
       resolve();
     };
     const timeout = setTimeout(finish, 250);
-    (noble as Noble).once('scanStop', finish);
-    (noble as Noble).stopScanning();
+    noble.once('scanStop', finish);
+    noble.stopScanning();
   });
 }
 
@@ -355,12 +413,12 @@ function connectAsync(peripheral: Peripheral, timeoutMs: number, logger: Logger)
 function cancelPendingConnect(peripheral: Peripheral, logger: Logger): void {
   if (peripheral.state !== 'connecting') return;
   try {
-    if (typeof (noble as Noble)._bindings?.cancelConnect === 'function' && typeof peripheral.cancelConnect === 'function') {
+    if (typeof noble._bindings?.cancelConnect === 'function' && typeof peripheral.cancelConnect === 'function') {
       peripheral.cancelConnect();
       return;
     }
-    if (typeof (noble as Noble)._bindings?.disconnect === 'function') {
-      (noble as Noble)._bindings.disconnect(peripheral.id);
+    if (typeof noble._bindings?.disconnect === 'function') {
+      noble._bindings.disconnect(peripheral.id);
     }
   } catch (error) {
     logger(`Could not cancel pending connection: ${errorMessage(error)}.`);

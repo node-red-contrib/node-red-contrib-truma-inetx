@@ -2,23 +2,23 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { connectToTruma, disconnectQuietly, readSoftwareRevision, shutdownBluetooth, type ConnectOptions } from './ble.js';
+import { connectToTruma, disconnectQuietly, isBluezAvailable, readSoftwareRevision, type ConnectOptions } from './ble.js';
 import { buildGroupReadSequence, buildTopicReadSequence, READ_SEQUENCE, TRUMA } from './constants.js';
 import { TrumaProtocol, type ReadRequest, type TrumaProtocolOptions } from './protocol.js';
 import { parseSettingsJson, type SettingsJson } from './settings.js';
 import { decodeFirstCbor, type TrumaValue } from './truma-frame.js';
 
-export { connectToTruma, disconnectQuietly, isTrumaPeripheral, readSoftwareRevision, shutdownBluetooth } from './ble.js';
+export { connectToTruma, disconnectQuietly, isBluezAvailable, isTrumaPeripheral, readSoftwareRevision, shutdownBluetooth } from './ble.js';
 export { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, READ_SEQUENCE, TRUMA } from './constants.js';
 export { TrumaProtocol };
 export { buildParameterWriteFrame, buildTrumaFrame, decodeFirstCbor, decodeTrumaFrame, findCborOffset, parseTrumaHeader } from './truma-frame.js';
 export { collectSettings, parseSettingsJson, settingsToJson } from './settings.js';
-export type { ConnectOptions, TrumaSession } from './ble.js';
+export type { BluetoothBackendName, ConnectOptions, TrumaSession } from './ble.js';
 export type { TrumaCharacteristic, TrumaCharacteristics, TrumaProtocolOptions } from './protocol.js';
 export type { CollectedSettings, JsonValue, SettingsJson, SettingsTopicJson, TrumaParameter, TrumaTopic } from './settings.js';
 export type { TrumaFrame, TrumaFrameHeader, TrumaValue } from './truma-frame.js';
 
-export interface ReadTrumaSettingsOptions extends ConnectOptions {
+export interface GetTrumaSettingsOptions extends ConnectOptions {
   protocol?: TrumaProtocolOptions;
   redact?: boolean;
   readRetries?: number;
@@ -27,7 +27,7 @@ export interface ReadTrumaSettingsOptions extends ConnectOptions {
   sequence?: ReadRequest[];
 }
 
-export interface SetTrumaParameterOptions extends ConnectOptions {
+export interface SetOptions extends ConnectOptions {
   protocol?: TrumaProtocolOptions;
   redact?: boolean;
   readRetries?: number;
@@ -37,7 +37,7 @@ export interface SetTrumaParameterOptions extends ConnectOptions {
   value: TrumaValue;
 }
 
-export interface PairTrumaOptions extends ConnectOptions {
+export interface PairOptions extends ConnectOptions {
   protocol?: TrumaProtocolOptions;
   holdMs?: number;
   linuxPairingMethod?: LinuxPairingMethod;
@@ -83,7 +83,7 @@ export type LinuxPairingMethod = 'noble-trigger' | 'bluez';
 
 const requireOptional = createRequire(import.meta.url);
 
-export async function readTrumaSettings({
+export async function get({
   protocol,
   redact = true,
   logger = () => {},
@@ -92,7 +92,7 @@ export async function readTrumaSettings({
   groups,
   sequence,
   ...connectOptions
-}: ReadTrumaSettingsOptions = {}): Promise<SettingsJson> {
+}: GetTrumaSettingsOptions = {}): Promise<SettingsJson> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= readRetries; attempt += 1) {
@@ -134,13 +134,13 @@ export async function readTrumaSettings({
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-export async function discoverTrumaTopology({
+export async function discover({
   protocol,
   redact = true,
   logger = () => {},
   readRetries = 1,
   ...connectOptions
-}: Omit<ReadTrumaSettingsOptions, 'topics' | 'groups' | 'sequence'> = {}): Promise<SettingsJson> {
+}: Omit<GetTrumaSettingsOptions, 'topics' | 'groups' | 'sequence'> = {}): Promise<SettingsJson> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= readRetries; attempt += 1) {
@@ -179,7 +179,7 @@ export async function discoverTrumaTopology({
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-export async function setTrumaParameter({
+export async function set({
   protocol,
   redact = true,
   logger = () => {},
@@ -189,7 +189,7 @@ export async function setTrumaParameter({
   parameter,
   value,
   ...connectOptions
-}: SetTrumaParameterOptions): Promise<SettingsJson> {
+}: SetOptions): Promise<SettingsJson> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= readRetries; attempt += 1) {
@@ -237,26 +237,29 @@ export async function setTrumaParameter({
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-export async function pairTruma({
+export async function pair({
   protocol,
   logger = () => {},
   holdMs = 20000,
-  linuxPairingMethod = 'noble-trigger',
+  linuxPairingMethod,
   linuxAgent = process.platform === 'linux',
   linuxAgentCapability = 'NoInputNoOutput',
   linuxLegacyPairing = false,
   linuxLegacyPowerCycle = false,
   linuxDisablePrivacy = false,
   ...connectOptions
-}: PairTrumaOptions = {}): Promise<PairTrumaResult> {
+}: PairOptions = {}): Promise<PairTrumaResult> {
   logger('Starting Truma pairing trigger.');
-  if (linuxPairingMethod === 'bluez') {
+  const bluetooth = connectOptions.bluetooth ?? 'auto';
+  const selectedPairingMethod = linuxPairingMethod ?? (bluetooth === 'bluez' || (bluetooth === 'auto' && (await isBluezAvailable(logger))) ? 'bluez' : 'noble-trigger');
+  if (selectedPairingMethod === 'bluez') {
+    const useLegacyPairing = linuxLegacyPairing || bluetooth === 'bluez' || bluetooth === 'auto';
     return pairTrumaWithBluez({
       logger,
       holdMs,
       linuxAgent,
       linuxAgentCapability,
-      linuxLegacyPairing,
+      linuxLegacyPairing: useLegacyPairing,
       linuxLegacyPowerCycle,
       linuxDisablePrivacy,
       namePrefix: connectOptions.namePrefix,
@@ -598,7 +601,7 @@ function loadDbusNext(): { systemBus: () => BluezBus; Variant: BluezVariantConst
     };
     return { systemBus: dbus.systemBus, Variant: dbus.Variant, Interface: dbus.interface.Interface };
   } catch (error) {
-    throw new Error(`BlueZ D-Bus pairing requires the optional "dbus-next" dependency. Run npm install before using pair --bluez. ${errorMessage(error)}`);
+    throw new Error(`BlueZ D-Bus pairing requires the optional "dbus-next" dependency. Run npm install before using pair --bluetooth bluez. ${errorMessage(error)}`);
   }
 }
 

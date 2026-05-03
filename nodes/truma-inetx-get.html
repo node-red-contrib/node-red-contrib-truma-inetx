@@ -1,0 +1,36 @@
+<script type="text/javascript">
+  RED.nodes.registerType('truma-inetx-get', {
+    category: 'Truma',
+    color: '#d8eef8',
+    defaults: {
+      name: { value: '' },
+      device: { type: 'truma-inetx-device', required: true },
+      topics: { value: '' }
+    },
+    inputs: 1,
+    outputs: 1,
+    icon: 'font-awesome/fa-download',
+    label: function () {
+      return this.name || 'Truma get';
+    }
+  });
+</script>
+
+<script type="text/html" data-template-name="truma-inetx-get">
+  <div class="form-row">
+    <label for="node-input-name"><i class="fa fa-tag"></i> Name</label>
+    <input type="text" id="node-input-name">
+  </div>
+  <div class="form-row">
+    <label for="node-input-device"><i class="fa fa-bluetooth"></i> Device</label>
+    <input type="text" id="node-input-device">
+  </div>
+  <div class="form-row">
+    <label for="node-input-topics"><i class="fa fa-list"></i> Topics</label>
+    <input type="text" id="node-input-topics" placeholder="Switches,AirHeating">
+  </div>
+</script>
+
+<script type="text/html" data-help-name="truma-inetx-get">
+  <p>Gets all settings or selected topics. Incoming <code>msg.payload</code> may be a topic string, topic array, or <code>{ topics }</code>.</p>
+</script>

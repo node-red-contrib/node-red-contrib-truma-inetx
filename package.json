@@ -1,9 +1,8 @@
 {
   "name": "node-red-contrib-truma-inetx",
   "version": "0.0.1",
-  "description": "Reverse engineering tools and Node.js BLE probe for Truma iNet X.",
+  "description": "Node.js BLE Lib, Cli and nodered device for Truma iNet X.",
   "type": "module",
-  "private": true,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -15,20 +14,28 @@
   "bin": {
     "truma-inetx": "./bin/truma-inetx.js"
   },
+  "node-red": {
+    "nodes": {
+      "truma-inetx-device": "nodes/truma-inetx-device.js",
+      "truma-inetx-get": "nodes/truma-inetx-get.js",
+      "truma-inetx-set": "nodes/truma-inetx-set.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -p tsconfig.json --build --clean",
     "discover": "npm run build --silent && node ./bin/truma-inetx.js discover",
+    "get": "npm run build --silent && node ./bin/truma-inetx.js get",
     "pair": "npm run build --silent && node ./bin/truma-inetx.js pair",
-    "read": "npm run build --silent && node ./bin/truma-inetx.js read",
     "set": "npm run build --silent && node ./bin/truma-inetx.js set",
-    "victron": "npm run build --silent && node ./bin/truma-inetx.js victron-prepare",
-    "check": "npm run build",
+    "lint": "eslint .",
+    "check": "npm run build && npm run lint && npm test",
     "test": "npm run build && node --test"
   },
   "dependencies": {
     "@abandonware/noble": "^1.9.2-26",
     "cbor-x": "^1.6.4",
+    "commander": "^14.0.3",
     "dbus-next": "^0.10.2"
   },
   "overrides": {
@@ -38,7 +45,10 @@
     "node": ">=20 <23"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.19.17",
-    "typescript": "^6.0.3"
+    "eslint": "^10.3.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.1"
   }
 }

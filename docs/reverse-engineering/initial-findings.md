@@ -55,7 +55,7 @@ The TypeScript CLI exposes this as:
 
 ```sh
 npm run pair
-npm run pair -- --hold-ms 30000
+npm run pair -- --debug
 ```
 
 Run it while the iNet X display is in Bluetooth pairing mode. The command keeps
@@ -68,14 +68,8 @@ On Venus OS, the iNet X may pair successfully but later sessions can still look
 like a BLE-level connection only: GATT connects, but the display does not switch
 to the active app connection icon and protocol subscription/read can stall.
 
-The working mitigation is to persist controller settings for Truma's legacy LE
-pairing behavior:
-
-```sh
-npm run victron
-```
-
-This runs the persistent `btmgmt` sequence:
+The working mitigation was to apply controller settings for Truma's legacy LE
+pairing behavior during BlueZ pairing:
 
 ```sh
 power off
@@ -84,9 +78,15 @@ io-cap 3
 power on
 ```
 
-Unlike the experimental `pair --legacy-pairing` path, this does not restore
-Secure Connections afterwards. It is a pairing/controller preparation command,
-not part of normal `discover` or `read`.
+Current CLI pairing keeps those details internal and only exposes backend
+selection:
+
+```sh
+npm run pair -- --bluetooth bluez --debug
+```
+
+Pairing/controller preparation is not part of normal `discover`, `get`, or
+`set`.
 
 Later Venus testing showed a more important distinction: noble-triggered pairing
 can complete SMP encryption and key exchange in `btmon`, but bluetoothd may not
@@ -97,11 +97,11 @@ the protected CCCD write with `Insufficient Encryption (0x0f)`.
 The Linux pairing path should therefore use BlueZ D-Bus:
 
 ```sh
-npm run pair -- --bluez --legacy-pairing --agent-capability NoInputNoOutput --hold-ms 30000
+npm run pair -- --bluetooth bluez --debug
 ```
 
 The goal is to make bluetoothd own the `org.bluez.Device1` object and persist
-the bond keys before noble is used for normal protocol reads/writes.
+the bond keys before normal protocol reads/writes.
 
 ## GATT Shape
 
