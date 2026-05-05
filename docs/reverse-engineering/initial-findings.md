@@ -1,24 +1,6 @@
 # Initial PacketLogger Findings
 
-These findings are derived from local `.pklg` captures. The raw captures and
-generated analysis text are intentionally ignored by git.
-
-## Capture Set
-
-The first three captures are cumulative saves of the same PacketLogger session:
-
-| Capture | Records | Meaning |
-| --- | ---: | --- |
-| `1. truma not active.pklg` | 3964 | Baseline scan; no Truma connection yet. |
-| `2. pairing actitve.pklg` | 7102 | Same prefix plus more scan/controller activity. |
-| `3. pair request.pklg` | 7523 | Same prefix plus Truma connection, GATT discovery, and pairing start. |
-
-The fourth capture is a fresh iOS trace after the app was already connected and
-read device state:
-
-| Capture | Records | Meaning |
-| --- | ---: | --- |
-| `4. full connect and read.pklg` | 1130 | Existing paired connection, app sends identity/state requests, iNet X returns topic data. |
+These findings are derived from local `.pklg` captures.
 
 ## Device Identity
 
@@ -163,9 +145,6 @@ first live milestone that made the Node.js probe read data successfully.
 
 ### Parameter Writes
 
-The `switches on off.pklg` capture shows that setting values uses the same
-control/data transport as reads:
-
 1. Write a control announce to the control characteristic:
    `01 <payload-length-le16>`.
 2. Wait for control notification `81 00`.
@@ -196,9 +175,6 @@ The capture also includes `PowerMgmt.PwrMode` writes to group `0x0101` using
 the same `{ tn, pn, v }` body. This strongly suggests temperature, energy
 source, and other writable settings use the same generic parameter-write shape;
 what changes is the target group, parameter name, and value encoding.
-
-Additional live tests and `change room temp.pklg` clarified the main control
-topics:
 
 - `Switches` and `WaterHeating` work with the generic parameter-write path.
 - Room heating is split across multiple topics:

@@ -55,43 +55,11 @@ npm run pair -- --bluetooth bluez --debug
 Pairing-specific BlueZ controller settings are only applied by `pair`, not by
 normal `discover`, `get`, or `set`.
 
-### Headless Venus OS / limited BlueZ shells
+### Headless Venus OS / Victron
 
-Venus OS images may not include `journalctl`, `systemctl`, or `busctl`, and
-`bluetoothctl`/`btmon` can be very noisy because other Victron services scan for
-BLE devices. A useful first cleanup step is:
+The pairing on an victron ekrano or GX device need to be currently done by the command line.
 
-```sh
-bluetoothctl scan off
-bluetoothctl show
-```
-
-If `Discovering: yes` returns immediately, another process is restarting BlueZ
-discovery. On limited shells, look for likely owners with:
-
-```sh
-ps | grep -Ei 'bluetooth|bluez|dbus|venus|victron|ble'
-```
-
-For pairing failures, the most useful `btmon` evidence is usually the SMP
-pairing/authentication result, not advertisement noise. Replace the address with
-the Truma address printed by `npm run pair -- --debug`:
-
-```sh
-btmon 2>/dev/null | grep -Ei 'smp|pair|auth|passkey|confirm|encrypt|fail|5A:B0:8D:B0:BC:3A'
-```
-
-If the shell has `timeout`, a saved short capture is easier to inspect:
-
-```sh
-timeout 30 btmon 2>/dev/null > /tmp/truma-btmon.txt
-grep -Ei 'smp|pair|auth|passkey|confirm|encrypt|fail|5A:B0:8D:B0:BC:3A' /tmp/truma-btmon.txt
-```
-
-The built-in pairing helper can make this project the default BlueZ agent, but
-it cannot forcibly unregister another process' D-Bus agent. If another Venus
-service immediately reclaims scanning or pairing behavior, stop/disable that
-service temporarily using the tools available on that image, then retry pairing.
+### Initial Build of Settings Tree
 
 Build a reusable settings tree:
 
@@ -183,17 +151,3 @@ Installing this package into Node-RED registers three nodes:
   override with `{ "topic", "parameter", "value", "group" }`.
 
 The operational nodes serialize BLE access through the shared device node.
-
-## Reverse Engineering
-
-This repo uses macOS PacketLogger captures as the primary source of protocol
-truth. Raw captures should be kept local and paired with a short timeline so
-the Bluetooth traffic can be matched to app actions.
-
-- Capture workflow: [docs/reverse-engineering/packetlogger-capture.md](docs/reverse-engineering/packetlogger-capture.md)
-- Control examples: [docs/control-examples.md](docs/control-examples.md)
-- Initial findings: [docs/reverse-engineering/initial-findings.md](docs/reverse-engineering/initial-findings.md)
-- Manifest template: [captures/manifest.template.md](captures/manifest.template.md)
-
-Raw `.pklg`, `.pcapng`, capture archives, generated analysis files, build
-output, and live output are ignored by git.
