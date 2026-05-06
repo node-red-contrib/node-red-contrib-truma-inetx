@@ -1,14 +1,12 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 
-import nobleModule from '@abandonware/noble';
-import type { NobleCharacteristic, NoblePeripheral } from '@abandonware/noble';
+import type { Noble, NobleCharacteristic, NoblePeripheral } from '@abandonware/noble';
 
 import { TRUMA } from './constants.js';
 import type { BluetoothBackend, BluetoothBackendName, ResolvedConnectOptions } from './ble/backend.js';
 import type { TrumaCharacteristic, TrumaCharacteristics } from './protocol.js';
 
-const noble = nobleModule;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15000;
 const DEFAULT_DISCOVER_TIMEOUT_MS = 15000;
 const DEFAULT_CONNECT_RETRIES = 3;
@@ -23,6 +21,18 @@ type BluezVariantConstructor = new (signature: string, value: unknown) => unknow
 export type { BluetoothBackendName };
 
 const requireOptional = createRequire(import.meta.url);
+
+async function loadNoble(): Promise<Noble> {
+  if (noble) return noble;
+  nobleImportPromise ??= import('@abandonware/noble').then((module) => module.default);
+  noble = await nobleImportPromise;
+  return noble;
+}
+
+function getLoadedNoble(): Noble {
+  if (!noble) throw new Error('Noble Bluetooth backend has not been initialized.');
+  return noble;
+}
 
 export interface TrumaSession {
   peripheral: Peripheral | BluezPeripheral;
@@ -49,6 +59,8 @@ export interface ConnectOptions {
 
 let activePeripheral: Peripheral | null = null;
 let activeBluezSession: TrumaSession | null = null;
+let noble: Noble | null = null;
+let nobleImportPromise: Promise<Noble> | null = null;
 
 const nobleBackend: BluetoothBackend = {
   name: 'noble',
@@ -89,6 +101,7 @@ async function connectToTrumaNoble({
   connectRetries,
   logger
 }: ResolvedConnectOptions): Promise<TrumaSession> {
+  await loadNoble();
   await waitForPoweredOn();
   logger('Bluetooth adapter powered on.');
   logger(`Scan matcher: namePrefix=${namePrefix}, advertisedService=${matchServiceUuid || '<disabled>'}, nobleServiceFilter=${scanServiceUuid || '<none>'}.`);
@@ -187,6 +200,7 @@ export async function shutdownBluetooth(): Promise<void> {
 }
 
 async function shutdownNoble(): Promise<void> {
+  if (!noble) return;
   noble.removeAllListeners('discover');
   await stopScanningAndWait();
   await disconnectQuietly(activePeripheral);
@@ -199,6 +213,7 @@ async function shutdownBluez(): Promise<void> {
 }
 
 async function waitForPoweredOn(): Promise<void> {
+  const noble = getLoadedNoble();
   if (noble.state === 'poweredOn') return;
   if (noble.state === 'unsupported' || noble.state === 'unauthorized') {
     throw new Error(`Bluetooth adapter state is ${noble.state}.`);
@@ -266,6 +281,7 @@ function scanAndConnect({
   connectTimeoutMs: number;
   logger: Logger;
 }): Promise<Peripheral> {
+  const noble = getLoadedNoble();
   return new Promise((resolve, reject) => {
     let candidate: Peripheral | null = null;
     let connecting = false;
@@ -337,11 +353,13 @@ export function isTrumaPeripheral(
 }
 
 function startScanning(scanServiceUuid: string | null, callback: (error?: Error) => void): void {
+  const noble = getLoadedNoble();
   const services = scanServiceUuid ? [scanServiceUuid] : [];
   noble.startScanning(services, true, callback);
 }
 
 function stopScanningAndWait(): Promise<void> {
+  const noble = getLoadedNoble();
   return new Promise((resolve) => {
     let settled = false;
     const finish = () => {
@@ -411,6 +429,7 @@ function connectAsync(peripheral: Peripheral, timeoutMs: number, logger: Logger)
 }
 
 function cancelPendingConnect(peripheral: Peripheral, logger: Logger): void {
+  const noble = getLoadedNoble();
   if (peripheral.state !== 'connecting') return;
   try {
     if (typeof noble._bindings?.cancelConnect === 'function' && typeof peripheral.cancelConnect === 'function') {
