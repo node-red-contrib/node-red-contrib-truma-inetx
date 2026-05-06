@@ -1,0 +1,10 @@
+.github/
+.node_modules/
+coverage/
+src/
+test/
+tools/
+tsconfig.json
+eslint.config.js
+docs/
+captures/
