@@ -59,5 +59,13 @@
     "eslint": "^10.3.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.59.1"
-  }
+  },
+  "keywords": [
+    "node-red",
+    "truma",
+    "inetx",
+    "bluetooth",
+    "ble"
+  ],
+  "license": "MIT"
 }
