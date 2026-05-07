@@ -5,6 +5,14 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/node-red-contrib/node-red-contrib-truma-inetx/"
+  },
+  "bugs": {
+    "url": "https://github.com/node-red-contrib/node-red-contrib-truma-inetx/issues"
+  },
+  "homepage": "https://github.com/node-red-contrib/node-red-contrib-truma-inetx#readme",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -15,6 +23,7 @@
     "truma-inetx": "bin/truma-inetx.js"
   },
   "node-red": {
+    "version": ">=3.1.0",
     "nodes": {
       "truma-inetx-device": "nodes/truma-inetx-device.js",
       "truma-inetx-get": "nodes/truma-inetx-get.js",
