@@ -238,6 +238,7 @@ async function shutdownNoble(): Promise<void> {
   if (!noble) return;
   noble.removeAllListeners('discover');
   await stopScanningAndWait();
+  if (activePeripheral?.state === 'connecting') cancelPendingConnect(activePeripheral, () => {});
   await disconnectQuietly(activePeripheral);
   activePeripheral = null;
 }

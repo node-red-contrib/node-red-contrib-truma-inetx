@@ -43,14 +43,31 @@ test('appends tiny trailing fragments to the previous response', async () => {
   assert.equal(protocol.responseBuffers[0].toString('hex'), `${response.toString('hex')}ffff`);
 });
 
+test('waits for announced response length before flushing split data', async () => {
+  const protocol = new TrumaProtocol(fakeCharacteristics());
+  const response = buildTrumaFrame('00000505', '0300', '0400', { topics: [{ tn: 'System', parameters: [{ pn: 'Ready', v: true }] }] });
+  const splitAt = response.length - 3;
+
+  protocol.handleControlNotification(Buffer.from([0x83, response.length & 0xff, response.length >> 8]));
+  await protocol.handleDataNotification(response.subarray(0, splitAt));
+  assert.equal(protocol.responseBuffers.length, 0);
+
+  await protocol.handleDataNotification(response.subarray(splitAt));
+  assert.equal(protocol.responseBuffers.length, 1);
+  assert.equal(protocol.responseBuffers[0].toString('hex'), response.toString('hex'));
+});
+
 test('builds selected-topic read sequence', () => {
   const sequence = buildTopicReadSequence(['System', 'BluetoothDevice']);
   const selectedTopics = sequence[1];
 
-  assert.equal(sequence.length, 4);
+  assert.equal(sequence.length, 6);
   assert.equal(selectedTopics.name, 'topics-System-BluetoothDevice');
   assert.equal(selectedTopics.addressMode, 'source-client');
   assert.deepEqual(decodeFirstCbor(selectedTopics.build()), { tn: ['System', 'BluetoothDevice'] });
+  assert.equal(sequence[4].name, 'read-device-list');
+  assert.equal(sequence[5].name, 'read-detected-device-groups');
+  assert.deepEqual(sequence[5].topics, ['System', 'BluetoothDevice']);
 });
 
 test('builds explicit group read sequence without topic-to-group assumptions', () => {
