@@ -180,9 +180,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function installSignalCleanup(): void {
   let shuttingDown = false;
   const handler = async () => {
-    if (shuttingDown) return;
+    if (shuttingDown) process.exit(130);
     shuttingDown = true;
-    await shutdownBluetooth();
+    await Promise.race([
+      shutdownBluetooth(),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 3000);
+      })
+    ]);
     process.exit(130);
   };
   process.once('SIGINT', handler);

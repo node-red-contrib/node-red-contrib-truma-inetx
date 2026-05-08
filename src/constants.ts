@@ -76,7 +76,9 @@ export function buildTopicReadSequence(topicNames: string[]): ReadRequest[] {
     READ_SEQUENCE[0],
     buildTopicRegistrationRequest(topicNames),
     READ_SEQUENCE[2],
-    READ_SEQUENCE[3]
+    READ_SEQUENCE[3],
+    READ_SEQUENCE[7],
+    { ...READ_SEQUENCE[8], topics: topicNames }
   ];
 }
 

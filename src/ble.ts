@@ -48,6 +48,8 @@ interface BluezPeripheral {
 export interface ConnectOptions {
   bluetooth?: BluetoothBackendName;
   namePrefix?: string;
+  deviceName?: string;
+  deviceAddress?: string;
   scanServiceUuid?: string | null;
   matchServiceUuid?: string | null;
   timeoutMs?: number;
@@ -55,6 +57,16 @@ export interface ConnectOptions {
   discoverTimeoutMs?: number;
   connectRetries?: number;
   logger?: Logger;
+}
+
+export interface TrumaDiscoveredDevice {
+  backend: Exclude<BluetoothBackendName, 'auto'>;
+  id: string;
+  name: string | null;
+  address: string | null;
+  rssi: number | null;
+  paired: boolean | null;
+  trusted: boolean | null;
 }
 
 let activePeripheral: Peripheral | null = null;
@@ -79,6 +91,8 @@ const bluezBackend: BluetoothBackend = {
 export async function connectToTruma({
   bluetooth = 'auto',
   namePrefix = TRUMA.advertisedNamePrefix,
+  deviceName,
+  deviceAddress,
   scanServiceUuid = null,
   matchServiceUuid = TRUMA.advertisedServiceUuid,
   timeoutMs = 30000,
@@ -88,11 +102,30 @@ export async function connectToTruma({
   logger = () => {}
 }: ConnectOptions = {}): Promise<TrumaSession> {
   const backend = await selectBluetoothBackend(bluetooth, logger);
-  return backend.connect({ namePrefix, scanServiceUuid, matchServiceUuid, timeoutMs, connectTimeoutMs, discoverTimeoutMs, connectRetries, logger });
+  return backend.connect({ namePrefix, deviceName, deviceAddress, scanServiceUuid, matchServiceUuid, timeoutMs, connectTimeoutMs, discoverTimeoutMs, connectRetries, logger });
+}
+
+export async function discoverTrumaDevices({
+  bluetooth = 'auto',
+  namePrefix = TRUMA.advertisedNamePrefix,
+  deviceName,
+  deviceAddress,
+  scanServiceUuid = null,
+  matchServiceUuid = TRUMA.advertisedServiceUuid,
+  timeoutMs = DEFAULT_DISCOVER_TIMEOUT_MS,
+  logger = () => {}
+}: ConnectOptions = {}): Promise<TrumaDiscoveredDevice[]> {
+  const backend = await selectBluetoothBackend(bluetooth, logger);
+  if (backend.name === 'bluez') {
+    return discoverTrumaDevicesBluez({ namePrefix, deviceName, deviceAddress, matchServiceUuid, timeoutMs, logger });
+  }
+  return discoverTrumaDevicesNoble({ namePrefix, deviceName, deviceAddress, scanServiceUuid, matchServiceUuid, timeoutMs, logger });
 }
 
 async function connectToTrumaNoble({
   namePrefix,
+  deviceName,
+  deviceAddress,
   scanServiceUuid,
   matchServiceUuid,
   timeoutMs,
@@ -108,6 +141,8 @@ async function connectToTrumaNoble({
 
   const peripheral = await scanAndConnectWithRetry({
     namePrefix,
+    deviceName,
+    deviceAddress,
     scanServiceUuid,
     matchServiceUuid,
     attempts: connectRetries,
@@ -203,6 +238,7 @@ async function shutdownNoble(): Promise<void> {
   if (!noble) return;
   noble.removeAllListeners('discover');
   await stopScanningAndWait();
+  if (activePeripheral?.state === 'connecting') cancelPendingConnect(activePeripheral, () => {});
   await disconnectQuietly(activePeripheral);
   activePeripheral = null;
 }
@@ -235,6 +271,8 @@ async function waitForPoweredOn(): Promise<void> {
 
 async function scanAndConnectWithRetry({
   namePrefix,
+  deviceName,
+  deviceAddress,
   scanServiceUuid,
   matchServiceUuid,
   attempts,
@@ -243,6 +281,8 @@ async function scanAndConnectWithRetry({
   logger
 }: {
   namePrefix: string;
+  deviceName?: string;
+  deviceAddress?: string;
   scanServiceUuid: string | null;
   matchServiceUuid: string | null;
   attempts: number;
@@ -255,7 +295,7 @@ async function scanAndConnectWithRetry({
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     logger(`Scanning and connecting (attempt ${attempt}/${attempts}).`);
     try {
-      return await scanAndConnect({ namePrefix, scanServiceUuid, matchServiceUuid, scanTimeoutMs, connectTimeoutMs, logger });
+      return await scanAndConnect({ namePrefix, deviceName, deviceAddress, scanServiceUuid, matchServiceUuid, scanTimeoutMs, connectTimeoutMs, logger });
     } catch (error) {
       lastError = error;
       logger(`Connect attempt ${attempt} failed: ${errorMessage(error)}.`);
@@ -268,6 +308,8 @@ async function scanAndConnectWithRetry({
 
 function scanAndConnect({
   namePrefix,
+  deviceName,
+  deviceAddress,
   scanServiceUuid,
   matchServiceUuid,
   scanTimeoutMs,
@@ -275,6 +317,8 @@ function scanAndConnect({
   logger
 }: {
   namePrefix: string;
+  deviceName?: string;
+  deviceAddress?: string;
   scanServiceUuid: string | null;
   matchServiceUuid: string | null;
   scanTimeoutMs: number;
@@ -309,7 +353,7 @@ function scanAndConnect({
 
     const onDiscover = (peripheral: Peripheral) => {
       if (connecting) return;
-      if (!isTrumaPeripheral(peripheral, { namePrefix, serviceUuid: matchServiceUuid })) return;
+      if (!isTrumaPeripheral(peripheral, { namePrefix, serviceUuid: matchServiceUuid, deviceName, deviceAddress })) return;
 
       connecting = true;
       candidate = peripheral;
@@ -337,13 +381,22 @@ export function isTrumaPeripheral(
   },
   {
     namePrefix = TRUMA.advertisedNamePrefix,
-    serviceUuid = TRUMA.advertisedServiceUuid
+    serviceUuid = TRUMA.advertisedServiceUuid,
+    deviceName,
+    deviceAddress
   }: {
     namePrefix?: string;
     serviceUuid?: string | null;
+    deviceName?: string;
+    deviceAddress?: string;
   } = {}
 ): boolean {
   const name = peripheral.advertisement?.localName || '';
+  const address = 'address' in peripheral && typeof peripheral.address === 'string' ? peripheral.address : '';
+  const targetMatches =
+    (!deviceName || name === deviceName) &&
+    (!deviceAddress || normalizeAddress(address) === normalizeAddress(deviceAddress));
+  if (!targetMatches) return false;
   if (name.startsWith(namePrefix)) return true;
 
   if (!serviceUuid) return false;
@@ -356,6 +409,55 @@ function startScanning(scanServiceUuid: string | null, callback: (error?: Error)
   const noble = getLoadedNoble();
   const services = scanServiceUuid ? [scanServiceUuid] : [];
   noble.startScanning(services, true, callback);
+}
+
+async function discoverTrumaDevicesNoble({
+  namePrefix,
+  deviceName,
+  deviceAddress,
+  scanServiceUuid,
+  matchServiceUuid,
+  timeoutMs,
+  logger
+}: {
+  namePrefix: string;
+  deviceName?: string;
+  deviceAddress?: string;
+  scanServiceUuid: string | null;
+  matchServiceUuid: string | null;
+  timeoutMs: number;
+  logger: Logger;
+}): Promise<TrumaDiscoveredDevice[]> {
+  await loadNoble();
+  await waitForPoweredOn();
+  const noble = getLoadedNoble();
+  const devices = new Map<string, TrumaDiscoveredDevice>();
+
+  return new Promise((resolve, reject) => {
+    const finish = async (error?: Error | null) => {
+      clearTimeout(timeout);
+      noble.removeListener('discover', onDiscover);
+      await stopScanningAndWait();
+      if (error) reject(error);
+      else resolve([...devices.values()].sort(sortDiscoveredDevices));
+    };
+
+    const timeout = setTimeout(() => {
+      finish().catch(reject);
+    }, timeoutMs);
+
+    const onDiscover = (peripheral: Peripheral) => {
+      if (!isTrumaPeripheral(peripheral, { namePrefix, serviceUuid: matchServiceUuid, deviceName, deviceAddress })) return;
+      const device = nobleDiscoveredDevice(peripheral);
+      logger(`Discovered ${displayDiscoveredDevice(device)}.`);
+      devices.set(deviceKey(device), device);
+    };
+
+    noble.on('discover', onDiscover);
+    startScanning(scanServiceUuid, (error?: Error) => {
+      if (error) finish(error).catch(reject);
+    });
+  });
 }
 
 function stopScanningAndWait(): Promise<void> {
@@ -499,6 +601,8 @@ function wrapCharacteristic(characteristic: Characteristic): TrumaCharacteristic
 
 async function connectToTrumaBluez({
   namePrefix,
+  deviceName,
+  deviceAddress,
   matchServiceUuid,
   timeoutMs,
   connectTimeoutMs,
@@ -506,6 +610,8 @@ async function connectToTrumaBluez({
   logger
 }: {
   namePrefix: string;
+  deviceName?: string;
+  deviceAddress?: string;
   matchServiceUuid: string | null;
   timeoutMs: number;
   connectTimeoutMs: number;
@@ -535,7 +641,7 @@ async function connectToTrumaBluez({
 
     let device: { path: string; address: string | null };
     try {
-      device = await waitForBluezDevice({ objectManager, initialObjects: objects, namePrefix, serviceUuid: canonicalServiceUuid, timeoutMs, logger });
+      device = await waitForBluezDevice({ objectManager, initialObjects: objects, namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid, timeoutMs, logger });
     } finally {
       await adapter.StopDiscovery().catch((error: unknown) => logger(`Warning: could not stop BlueZ discovery: ${errorMessage(error)}`));
     }
@@ -568,6 +674,63 @@ async function connectToTrumaBluez({
   } catch (error) {
     bus.disconnect();
     throw error;
+  }
+}
+
+async function discoverTrumaDevicesBluez({
+  namePrefix,
+  deviceName,
+  deviceAddress,
+  matchServiceUuid,
+  timeoutMs,
+  logger
+}: {
+  namePrefix: string;
+  deviceName?: string;
+  deviceAddress?: string;
+  matchServiceUuid: string | null;
+  timeoutMs: number;
+  logger: Logger;
+}): Promise<TrumaDiscoveredDevice[]> {
+  if (process.platform !== 'linux') throw new Error('BlueZ backend is only available on Linux.');
+  const { systemBus, Variant } = loadDbusNext();
+  const bus = systemBus();
+  const normalizedServiceUuid = matchServiceUuid ? normalizeUuid(matchServiceUuid) : undefined;
+  const canonicalServiceUuid = normalizedServiceUuid ? formatCanonicalUuid(normalizedServiceUuid) : undefined;
+  const devices = new Map<string, TrumaDiscoveredDevice>();
+
+  try {
+    const objectManagerObject = await bus.getProxyObject('org.bluez', '/');
+    const objectManager = objectManagerObject.getInterface('org.freedesktop.DBus.ObjectManager') as BluezObjectManager;
+    const objects = await objectManager.GetManagedObjects();
+    const adapterPath = findBluezAdapterPath(objects);
+    if (!adapterPath) throw new Error('Could not find a BlueZ adapter via org.bluez ObjectManager.');
+
+    addMatchingBluezDevices(devices, objects, { namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid });
+
+    const adapterObject = await bus.getProxyObject('org.bluez', adapterPath);
+    const adapter = adapterObject.getInterface('org.bluez.Adapter1') as BluezAdapter;
+    await setBluezDiscoveryFilter(adapter, Variant, canonicalServiceUuid, logger);
+    await adapter.StartDiscovery();
+    logger(`BlueZ discovery started. Waiting ${timeoutMs}ms for Truma devices.`);
+
+    await new Promise<void>((resolve) => {
+      const onInterfacesAdded = (path: string, interfaces: Record<string, Record<string, unknown>>) => {
+        addMatchingBluezDevices(devices, { [path]: interfaces }, { namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid });
+      };
+      const done = () => {
+        clearTimeout(timeout);
+        objectManager.off('InterfacesAdded', onInterfacesAdded);
+        resolve();
+      };
+      const timeout = setTimeout(done, timeoutMs);
+      objectManager.on('InterfacesAdded', onInterfacesAdded);
+    });
+
+    await adapter.StopDiscovery().catch((error: unknown) => logger(`Warning: could not stop BlueZ discovery: ${errorMessage(error)}`));
+    return [...devices.values()].sort(sortDiscoveredDevices);
+  } finally {
+    bus.disconnect();
   }
 }
 
@@ -719,6 +882,8 @@ async function waitForBluezDevice({
   objectManager,
   initialObjects,
   namePrefix,
+  deviceName,
+  deviceAddress,
   serviceUuid,
   timeoutMs,
   logger
@@ -726,11 +891,13 @@ async function waitForBluezDevice({
   objectManager: BluezObjectManager;
   initialObjects: BluezObjects;
   namePrefix: string;
+  deviceName?: string;
+  deviceAddress?: string;
   serviceUuid: string | undefined;
   timeoutMs: number;
   logger: Logger;
 }): Promise<{ path: string; address: string | null }> {
-  const initialMatch = findBluezDevice(initialObjects, { namePrefix, serviceUuid });
+  const initialMatch = findBluezDevice(initialObjects, { namePrefix, deviceName, deviceAddress, serviceUuid });
   if (initialMatch) return initialMatch;
 
   return new Promise((resolve, reject) => {
@@ -739,7 +906,7 @@ async function waitForBluezDevice({
       reject(new Error(`Timed out after ${timeoutMs}ms waiting for BlueZ to discover ${namePrefix}.`));
     }, timeoutMs);
     const onInterfacesAdded = (path: string, interfaces: Record<string, Record<string, unknown>>) => {
-      const match = findBluezDevice({ [path]: interfaces }, { namePrefix, serviceUuid });
+      const match = findBluezDevice({ [path]: interfaces }, { namePrefix, deviceName, deviceAddress, serviceUuid });
       if (!match) return;
       clearTimeout(timeout);
       objectManager.off('InterfacesAdded', onInterfacesAdded);
@@ -750,17 +917,81 @@ async function waitForBluezDevice({
   });
 }
 
-function findBluezDevice(objects: BluezObjects, { namePrefix, serviceUuid }: { namePrefix: string; serviceUuid: string | undefined }): { path: string; address: string | null } | null {
+function findBluezDevice(
+  objects: BluezObjects,
+  { namePrefix, deviceName, deviceAddress, serviceUuid }: { namePrefix: string; deviceName?: string; deviceAddress?: string; serviceUuid: string | undefined }
+): { path: string; address: string | null } | null {
   for (const [path, interfaces] of Object.entries(objects)) {
     const device = interfaces['org.bluez.Device1'];
     if (!device) continue;
     const name = String(unboxBluezValue(device.Name) || unboxBluezValue(device.Alias) || '');
     const address = nullableString(unboxBluezValue(device.Address));
     const uuids = Array.isArray(unboxBluezValue(device.UUIDs)) ? (unboxBluezValue(device.UUIDs) as unknown[]).map((uuid) => String(uuid).toLowerCase()) : [];
+    if (deviceName && name !== deviceName) continue;
+    if (deviceAddress && normalizeAddress(address) !== normalizeAddress(deviceAddress)) continue;
     if (name.startsWith(namePrefix)) return { path, address };
     if (serviceUuid && uuids.includes(serviceUuid.toLowerCase())) return { path, address };
   }
   return null;
+}
+
+function addMatchingBluezDevices(
+  output: Map<string, TrumaDiscoveredDevice>,
+  objects: BluezObjects,
+  { namePrefix, deviceName, deviceAddress, serviceUuid }: { namePrefix: string; deviceName?: string; deviceAddress?: string; serviceUuid: string | undefined }
+): void {
+  for (const [path, interfaces] of Object.entries(objects)) {
+    const bluezDevice = interfaces['org.bluez.Device1'];
+    const device = bluezDiscoveredDevice(path, bluezDevice);
+    if (!device) continue;
+    const uuidValue = unboxBluezValue(bluezDevice?.UUIDs);
+    const uuids = Array.isArray(uuidValue) ? uuidValue.map((uuid) => String(uuid).toLowerCase()) : [];
+    const name = device.name || '';
+    if (deviceName && name !== deviceName) continue;
+    if (deviceAddress && normalizeAddress(device.address) !== normalizeAddress(deviceAddress)) continue;
+    if (!name.startsWith(namePrefix) && !(serviceUuid && uuids.includes(serviceUuid.toLowerCase()))) continue;
+    output.set(deviceKey(device), device);
+  }
+}
+
+function nobleDiscoveredDevice(peripheral: Peripheral): TrumaDiscoveredDevice {
+  return {
+    backend: 'noble',
+    id: peripheral.id,
+    name: peripheral.advertisement?.localName || null,
+    address: peripheral.address || null,
+    rssi: typeof peripheral.rssi === 'number' ? peripheral.rssi : null,
+    paired: null,
+    trusted: null
+  };
+}
+
+function bluezDiscoveredDevice(path: string, device: Record<string, unknown> | undefined): TrumaDiscoveredDevice | null {
+  if (!device) return null;
+  return {
+    backend: 'bluez',
+    id: path,
+    name: nullableString(unboxBluezValue(device.Name)) || nullableString(unboxBluezValue(device.Alias)),
+    address: nullableString(unboxBluezValue(device.Address)),
+    rssi: nullableNumber(unboxBluezValue(device.RSSI)),
+    paired: nullableBoolean(unboxBluezValue(device.Paired)),
+    trusted: nullableBoolean(unboxBluezValue(device.Trusted))
+  };
+}
+
+function deviceKey(device: TrumaDiscoveredDevice): string {
+  return normalizeAddress(device.address) || `${device.backend}:${device.id || device.name || ''}`;
+}
+
+function displayDiscoveredDevice(device: TrumaDiscoveredDevice): string {
+  return `${device.name || '<unnamed>'} (${device.address || device.id}, ${device.backend}, paired=${device.paired ?? 'unknown'}, rssi=${device.rssi ?? 'unknown'})`;
+}
+
+function sortDiscoveredDevices(left: TrumaDiscoveredDevice, right: TrumaDiscoveredDevice): number {
+  const leftPaired = left.paired === true ? 0 : 1;
+  const rightPaired = right.paired === true ? 0 : 1;
+  if (leftPaired !== rightPaired) return leftPaired - rightPaired;
+  return (right.rssi ?? -999) - (left.rssi ?? -999);
 }
 
 async function getBluezBoolean(properties: BluezProperties, interfaceName: string, propertyName: string): Promise<boolean | null> {
@@ -787,6 +1018,18 @@ function formatCanonicalUuid(uuid: string): string {
 
 function nullableString(value: unknown): string | null {
   return typeof value === 'string' && value ? value : null;
+}
+
+function nullableNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function nullableBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function normalizeAddress(value: unknown): string {
+  return typeof value === 'string' ? value.toLowerCase() : '';
 }
 
 async function writeBluezValueWithRetry(characteristic: BluezCharacteristic, value: number[], options: Record<string, unknown>): Promise<void> {

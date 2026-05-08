@@ -17,10 +17,11 @@ module.exports = function registerTrumaSetNode(RED) {
         const value = override.value ?? parseSetValue(node.value);
         if (!topic) throw new Error('No Truma topic configured.');
         if (!parameter) throw new Error('No Truma parameter configured.');
-        const targetGroup = override.group ?? node.device.groupForTopic(topic);
+        node.status({ fill: 'yellow', shape: 'ring', text: 'writing' });
+        const targetGroup = override.group ?? (await node.device.groupForTopic(topic));
         const result = await node.device.enqueue((truma) =>
           truma.set({
-            bluetooth: node.device.bluetooth,
+            ...node.device.connectOptions(),
             logger: (message) => node.device.logDebug(message),
             targetGroup,
             topic,
@@ -28,10 +29,13 @@ module.exports = function registerTrumaSetNode(RED) {
             value
           })
         );
+        node.device.mergeTree(result);
+        node.status({ fill: 'green', shape: 'dot', text: 'written' });
         msg.payload = result;
         emit(msg);
         done?.();
       } catch (error) {
+        node.status({ fill: 'red', shape: 'ring', text: 'error' });
         done ? done(error) : node.error(error, msg);
       }
     });

@@ -4,10 +4,127 @@
     defaults: {
       name: { value: '' },
       bluetooth: { value: 'auto' },
-      debug: { value: false }
+      targetMode: { value: 'first' },
+      deviceName: { value: '' },
+      deviceAddress: { value: '' }
     },
     label: function () {
-      return this.name || 'Truma iNet X';
+      return this.name || this.deviceName || this.deviceAddress || 'Truma iNet X';
+    },
+    oneditprepare: function () {
+      var nodeId = this.id;
+      var deviceSelect = $('#node-config-input-deviceSelect');
+      var targetMode = $('#node-config-input-targetMode');
+      var deviceName = $('#node-config-input-deviceName');
+      var deviceAddress = $('#node-config-input-deviceAddress');
+      var searchButton = $('#node-config-input-search');
+      var searchStatus = $('#node-config-input-search-status');
+      var refreshButton = $('#node-config-input-refresh-tree');
+      var refreshStatus = $('#node-config-input-refresh-tree-status');
+
+      function deviceValue(name, address) {
+        return JSON.stringify({ name: name || '', address: address || '' });
+      }
+
+      function deviceLabel(device) {
+        var name = device.name || '<unnamed>';
+        var address = device.address || device.id || 'unknown address';
+        var paired = device.paired === true ? 'paired' : device.paired === false ? 'not paired' : 'pairing unknown';
+        var rssi = typeof device.rssi === 'number' ? ', rssi ' + device.rssi : '';
+        return name + ' (' + address + ', ' + device.backend + ', ' + paired + rssi + ')';
+      }
+
+      function appendDeviceOption(device) {
+        deviceSelect.append(
+          $('<option></option>')
+            .attr('value', deviceValue(device.name, device.address))
+            .text(deviceLabel(device))
+        );
+      }
+
+      function setSelected(mode, name, address) {
+        targetMode.val(mode);
+        deviceName.val(name || '');
+        deviceAddress.val(address || '');
+        deviceSelect.val(mode === 'device' ? deviceValue(name, address) : '');
+      }
+
+      function ensureCurrentOption() {
+        var currentName = deviceName.val();
+        var currentAddress = deviceAddress.val();
+        if (currentName || currentAddress) {
+          var currentValue = deviceValue(currentName, currentAddress);
+          var hasCurrent = false;
+          deviceSelect.find('option').each(function () {
+            if ($(this).attr('value') === currentValue) hasCurrent = true;
+          });
+          if (!hasCurrent) {
+            deviceSelect.append($('<option></option>').attr('value', currentValue).text((currentName || '<unnamed>') + ' (' + (currentAddress || 'unknown address') + ')'));
+          }
+        }
+        setSelected(targetMode.val() || (currentName || currentAddress ? 'device' : 'first'), currentName, currentAddress);
+      }
+
+      deviceSelect.on('change', function () {
+        var selected = deviceSelect.val();
+        if (!selected) {
+          setSelected('first', '', '');
+          return;
+        }
+        try {
+          var parsed = JSON.parse(selected);
+          setSelected('device', parsed.name, parsed.address);
+        } catch (error) {
+          setSelected('first', '', '');
+        }
+      });
+
+      searchButton.on('click', function () {
+        searchButton.prop('disabled', true);
+        searchStatus.text('searching...');
+        $.getJSON('truma-inetx/devices', {
+          bluetooth: $('#node-config-input-bluetooth').val()
+        })
+          .done(function (devices) {
+            var previousName = deviceName.val();
+            var previousAddress = deviceAddress.val();
+            deviceSelect.empty();
+            deviceSelect.append($('<option></option>').attr('value', '').text('First discovered Truma iNet X'));
+            devices.forEach(appendDeviceOption);
+            setSelected(previousName || previousAddress ? 'device' : 'first', previousName, previousAddress);
+            if (deviceSelect.val() === null) setSelected('first', '', '');
+            searchStatus.text(devices.length + ' found');
+          })
+          .fail(function (xhr) {
+            var response = xhr.responseJSON || {};
+            searchStatus.text(response.error || 'search failed');
+          })
+          .always(function () {
+            searchButton.prop('disabled', false);
+          });
+      });
+
+      refreshButton.on('click', function () {
+        if (!nodeId) {
+          refreshStatus.text('deploy first');
+          return;
+        }
+        refreshButton.prop('disabled', true);
+        refreshStatus.text('reading...');
+        $.getJSON('truma-inetx/device/' + encodeURIComponent(nodeId) + '/tree')
+          .done(function (result) {
+            refreshStatus.text((result.topics || []).length + ' topics');
+          })
+          .fail(function (xhr) {
+            var response = xhr.responseJSON || {};
+            refreshStatus.text(response.error || 'read failed');
+          })
+          .always(function () {
+            refreshButton.prop('disabled', false);
+          });
+      });
+
+      ensureCurrentOption();
     }
   });
 </script>
@@ -26,11 +143,26 @@
     </select>
   </div>
   <div class="form-row">
-    <label for="node-config-input-debug"><i class="fa fa-bug"></i> Debug</label>
-    <input type="checkbox" id="node-config-input-debug" style="display:inline-block;width:auto;vertical-align:top;">
+    <label for="node-config-input-deviceSelect"><i class="fa fa-search"></i> Device</label>
+    <select id="node-config-input-deviceSelect" style="width:60%;">
+      <option value="">First discovered Truma iNet X</option>
+    </select>
+    <button type="button" id="node-config-input-search" class="red-ui-button" style="margin-left:4px;">Search</button>
+    <input type="hidden" id="node-config-input-targetMode">
+    <input type="hidden" id="node-config-input-deviceName">
+    <input type="hidden" id="node-config-input-deviceAddress">
+  </div>
+  <div class="form-row">
+    <label></label>
+    <span id="node-config-input-search-status" style="color:#666;"></span>
+  </div>
+  <div class="form-row">
+    <label><i class="fa fa-sitemap"></i> Device tree</label>
+    <button type="button" id="node-config-input-refresh-tree" class="red-ui-button">Reread</button>
+    <span id="node-config-input-refresh-tree-status" style="margin-left:8px;color:#666;"></span>
   </div>
 </script>
 
 <script type="text/html" data-help-name="truma-inetx-device">
-  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree.</p>
+  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Use search to select a visible paired device, and reread to merge a fresh device tree into the cache.</p>
 </script>

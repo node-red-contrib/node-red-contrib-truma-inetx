@@ -14,6 +14,46 @@
     icon: 'font-awesome/fa-upload',
     label: function () {
       return this.name || 'Truma set';
+    },
+    oneditprepare: function () {
+      var deviceInput = $('#node-input-device');
+      var topicInput = $('#node-input-topic');
+      var topicSelect = $('#node-input-topic-select');
+      var topicStatus = $('#node-input-topic-status');
+
+      function loadTopics() {
+        var deviceId = deviceInput.val();
+        topicSelect.empty();
+        topicSelect.append($('<option></option>').attr('value', '').text('Select topic'));
+        if (!deviceId || deviceId === '_ADD_') {
+          topicStatus.text('');
+          return;
+        }
+        topicStatus.text('loading...');
+        $.getJSON('truma-inetx/device/' + encodeURIComponent(deviceId) + '/topics')
+          .done(function (topics) {
+            topics.forEach(function (topic) {
+              topicSelect.append($('<option></option>').attr('value', topic).text(topic));
+            });
+            if (topicInput.val()) topicSelect.val(topicInput.val());
+            topicStatus.text(topics.length ? topics.length + ' available' : 'no tree yet');
+          })
+          .fail(function () {
+            topicStatus.text('topics unavailable');
+          });
+      }
+
+      topicSelect.on('change', function () {
+        var selected = topicSelect.val();
+        if (selected) topicInput.val(selected);
+      });
+
+      topicInput.on('change keyup', function () {
+        topicSelect.val(topicInput.val());
+      });
+
+      deviceInput.on('change', loadTopics);
+      loadTopics();
     }
   });
 </script>
@@ -30,6 +70,13 @@
   <div class="form-row">
     <label for="node-input-topic"><i class="fa fa-folder"></i> Topic</label>
     <input type="text" id="node-input-topic" placeholder="Switches">
+  </div>
+  <div class="form-row">
+    <label for="node-input-topic-select"><i class="fa fa-list"></i> Known topic</label>
+    <select id="node-input-topic-select" style="width:60%;">
+      <option value="">Select topic</option>
+    </select>
+    <span id="node-input-topic-status" style="margin-left:8px;color:#666;"></span>
   </div>
   <div class="form-row">
     <label for="node-input-parameter"><i class="fa fa-sliders"></i> Parameter</label>
