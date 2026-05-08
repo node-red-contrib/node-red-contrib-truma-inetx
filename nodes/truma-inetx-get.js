@@ -11,17 +11,24 @@ module.exports = function registerTrumaGetNode(RED) {
         if (!node.device) throw new Error('Truma iNet X device node is not configured.');
         const override = normalizePayload(msg.payload);
         const topics = override.topics ?? node.topics;
+        node.status({ fill: 'yellow', shape: 'ring', text: topics.length ? 'reading topics' : 'reading all' });
+        const missingTopics = topics.length ? await node.device.ensureTopics(topics) : [];
+        const groups = missingTopics.length ? undefined : node.device.groupsForTopics(topics);
         const result = await node.device.enqueue((truma) =>
           truma.get({
-            bluetooth: node.device.bluetooth,
+            ...node.device.connectOptions(),
             logger: (message) => node.device.logDebug(message),
-            ...(topics.length ? { topics, groups: node.device.groupsForTopics(topics) } : {})
+            ...(topics.length ? { topics, groups } : {})
           })
         );
+        node.device.mergeTree(result);
+        const topicCount = Object.keys(result.topics || {}).length;
+        node.status({ fill: 'green', shape: 'dot', text: `${topicCount} topic${topicCount === 1 ? '' : 's'}` });
         msg.payload = result;
         emit(msg);
         done?.();
       } catch (error) {
+        node.status({ fill: 'red', shape: 'ring', text: 'error' });
         done ? done(error) : node.error(error, msg);
       }
     });

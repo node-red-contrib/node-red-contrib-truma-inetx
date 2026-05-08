@@ -13,7 +13,8 @@ export { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, REA
 export { TrumaProtocol };
 export { buildParameterWriteFrame, buildTrumaFrame, decodeFirstCbor, decodeTrumaFrame, findCborOffset, parseTrumaHeader } from './truma-frame.js';
 export { collectSettings, parseSettingsJson, settingsToJson } from './settings.js';
-export type { BluetoothBackendName, ConnectOptions, TrumaSession } from './ble.js';
+export { discoverTrumaDevices } from './ble.js';
+export type { BluetoothBackendName, ConnectOptions, TrumaDiscoveredDevice, TrumaSession } from './ble.js';
 export type { TrumaCharacteristic, TrumaCharacteristics, TrumaProtocolOptions } from './protocol.js';
 export type { CollectedSettings, JsonValue, SettingsJson, SettingsTopicJson, TrumaParameter, TrumaTopic } from './settings.js';
 export type { TrumaFrame, TrumaFrameHeader, TrumaValue } from './truma-frame.js';
