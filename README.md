@@ -13,7 +13,9 @@ operation. This leaves the panel available for the Truma phone app between
 Node-RED operations, instead of occupying its Bluetooth connection continuously.
 Allow time between polling requests so the phone app can connect.
 
-## Related project
+## Related projects
+
+### Python / Home Assistant alternative
 
 [daaaaan/truma-inetx-ble](https://github.com/daaaaan/truma-inetx-ble) is an
 alternative Python implementation with Home Assistant integration, MQTT, and a
@@ -24,6 +26,18 @@ The two projects were developed independently. We discovered that project by
 chance after developing this implementation; its development started earlier.
 Sharing protocol findings and interoperability experiences could help both
 projects support more Truma setups.
+
+### Victron dashboards and GX Touch integration
+
+[Mathieu0994/Victron-x-Truma-Integration-](https://github.com/Mathieu0994/Victron-x-Truma-Integration-)
+uses this package for BLE communication and adds a Node-RED Dashboard 2 UI
+accessible through VRM, a D-Bus bridge, and a custom GX Touch page for controlling
+a Truma D6E from a Victron GX device. It is a complementary project for users
+looking for a ready-made Venus OS interface built on this library. See its
+README for tested hardware, firmware versions, and deployment limitations.
+
+Release announcements and compatibility testing with Mathieu are coordinated in
+[Victron-x-Truma-Integration- issue #5](https://github.com/Mathieu0994/Victron-x-Truma-Integration-/issues/5).
 
 ## Usage
 
@@ -190,3 +204,16 @@ The operational nodes serialize BLE access through the shared device node.
   persistent client identity and compatibility across panels and firmware.
   Keep releasing the connection after each operation so the phone app can
   continue to connect between operations.
+- [ ] Coordinate testing of adapter selection, pairing, and other integration
+  changes with Mathieu's Victron project using the release checklist below.
+
+## Release coordination
+
+For each published release:
+
+- [ ] Notify `@Mathieu0994` in
+  [issue #5](https://github.com/Mathieu0994/Victron-x-Truma-Integration-/issues/5)
+  with the released version, a release link, and relevant changes or upgrade
+  instructions so he can test his integration against it.
+- [ ] Ask for compatibility feedback from his Truma D6E / Victron setup and
+  follow up on any reported regressions.
