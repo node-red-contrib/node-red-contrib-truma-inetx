@@ -36,9 +36,6 @@ a Truma D6E from a Victron GX device. It is a complementary project for users
 looking for a ready-made Venus OS interface built on this library. See its
 README for tested hardware, firmware versions, and deployment limitations.
 
-Release announcements and compatibility testing with Mathieu are coordinated in
-[Victron-x-Truma-Integration- issue #5](https://github.com/Mathieu0994/Victron-x-Truma-Integration-/issues/5).
-
 ## Usage
 
 Install dependencies:
@@ -248,42 +245,3 @@ For room and boiler sensors on Venus OS, import
 the official Victron virtual-device nodes, converts raw temperature units once,
 and disconnects missing or stale sensors. See
 [the setup guide](docs/victron-temperatures.md).
-
-## TODO
-
-- [x] Add Bluetooth adapter selection (for example, `hci0` or `hci1`) to the
-  `truma-inetx-device` configuration and use it consistently for discovery,
-  pairing, reads, and writes.
-- [x] Investigate and add pairing directly from the `truma-inetx-device`
-  configuration, including entry of the code shown on the panel where required,
-  so end users do not need the command line.
-- [x] Calculate `SystemTime.Lot` from the applicable local UTC offset, including
-  daylight saving time, instead of sending a fixed value.
-- [x] Distinguish confirmed parameter writes from requests sent without a
-  matching confirmation.
-- [x] Validate writes against discovered parameter metadata, including ranges
-  and enum values.
-- [x] Compare protocol findings with
-  [daaaaan/truma-inetx-ble](https://github.com/daaaaan/truma-inetx-ble), including
-  persistent client identity: see [comparison notes](docs/protocol-comparison.md).
-  Keep releasing the connection after each operation so the phone app can
-  continue to connect between operations.
-- [x] Provide a Node-RED / Victron temperature-sensor example without an extra
-  Python service.
-- [ ] Hardware-test pairing codes, multiple adapters, write confirmations and
-  timezone behavior on different panels/firmware.
-- [ ] Test persistent `MobileIdentity` across reconnects and phone-app usage
-  before introducing identity writes into normal sessions.
-- [ ] Coordinate testing of adapter selection, pairing, and other integration
-  changes with Mathieu's Victron project using the release checklist below.
-
-## Release coordination
-
-For each published release:
-
-- [ ] Notify `@Mathieu0994` in
-  [issue #5](https://github.com/Mathieu0994/Victron-x-Truma-Integration-/issues/5)
-  with the released version, a release link, and relevant changes or upgrade
-  instructions so he can test his integration against it.
-- [ ] Ask for compatibility feedback from his Truma D6E / Victron setup and
-  follow up on any reported regressions.
