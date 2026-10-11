@@ -109,3 +109,53 @@ function fakeCharacteristics() {
     softwareRevision: null
   };
 }
+
+test('write confirmation requires the requested value from the addressed group', async () => {
+  const protocol = new TrumaProtocol(fakeCharacteristics(), { timings: { writeConfirmationTimeoutMs: 5 } });
+  protocol.start = async () => {};
+  const frame = (source, value, parameter = 'TgtTemp') => buildTrumaFrame(source, '0300', '0400', {
+    topics: [{ tn: 'AirHeating', parameters: [{ pn: parameter, v: value }] }]
+  });
+  const request = { targetGroup: 0x0201, topicName: 'AirHeating', parameterName: 'TgtTemp', value: 220 };
+  for (const response of [frame('03050201', 220), frame('03050102', 210), frame('03050102', 220, 'Temp')]) {
+    protocol.sendFrame = async () => { protocol.responseBuffers.push(response); };
+    await assert.rejects(protocol.writeParameter(request), { code: 'TRUMA_WRITE_UNCONFIRMED' });
+  }
+  protocol.sendFrame = async () => { protocol.responseBuffers.push(frame('03050102', 220)); };
+  assert.equal((await protocol.writeParameter(request)).length, 1);
+  protocol.close();
+});
+
+test('write confirmation rejects no response, earlier cached values and an outgoing frame echo', async () => {
+  const protocol = new TrumaProtocol(fakeCharacteristics(), { timings: { writeConfirmationTimeoutMs: 5 } });
+  protocol.start = async () => {};
+  protocol.responseBuffers.push(buildTrumaFrame('03050102', '0300', '0400', { tn: 'AirHeating', pn: 'TgtTemp', v: 220 }));
+  protocol.sendFrame = async () => {};
+  const request = { targetGroup: 0x0201, topicName: 'AirHeating', parameterName: 'TgtTemp', value: 220 };
+  await assert.rejects(protocol.writeParameter(request), { code: 'TRUMA_WRITE_UNCONFIRMED' });
+  protocol.sendFrame = async (outgoing) => { protocol.responseBuffers.push(outgoing); };
+  await assert.rejects(protocol.writeParameter(request), { code: 'TRUMA_WRITE_UNCONFIRMED' });
+  protocol.close();
+});
+
+test('transport failure after payload submission is unconfirmed; failure before submission stays a connection error', async () => {
+  const protocol = new TrumaProtocol(fakeCharacteristics());
+  protocol.start = async () => {};
+  const request = { targetGroup: 0x0201, topicName: 'AirHeating', parameterName: 'TgtTemp', value: 220 };
+  const failure = new Error('GATT disconnected');
+  protocol.sendFrame = async () => { throw failure; };
+  await assert.rejects(protocol.writeParameter(request), (error) => error === failure);
+  protocol.sendFrame = async (_payload, _request, submitted) => { submitted(); throw failure; };
+  await assert.rejects(protocol.writeParameter(request), (error) => error.code === 'TRUMA_WRITE_UNCONFIRMED' && error.cause === failure);
+  protocol.close();
+});
+
+test('a decodable CBOR value in a frame that is shorter than its declared length is not a confirmation', async () => {
+  const protocol = new TrumaProtocol(fakeCharacteristics(), { timings: { writeConfirmationTimeoutMs: 5 } });
+  protocol.start = async () => {};
+  const frame = buildTrumaFrame('03050102', '0300', '0400', { tn: 'AirHeating', pn: 'TgtTemp', v: 220 });
+  frame.writeUInt16LE(frame.readUInt16LE(4) + 10, 4);
+  protocol.sendFrame = async () => { protocol.responseBuffers.push(frame); };
+  await assert.rejects(protocol.writeParameter({ targetGroup: 0x0201, topicName: 'AirHeating', parameterName: 'TgtTemp', value: 220 }), { code: 'TRUMA_WRITE_UNCONFIRMED' });
+  protocol.close();
+});

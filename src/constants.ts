@@ -1,3 +1,4 @@
+import { buildSystemTimeFrame } from './system-time.js';
 import { buildTrumaFrame } from './truma-frame.js';
 import type { ReadRequest } from './protocol.js';
 
@@ -25,18 +26,7 @@ export const READ_SEQUENCE: ReadRequest[] = [
   {
     name: 'client-system-time',
     addressMode: 'client-local',
-    build: () => buildTrumaFrame('00050005', '0300', '8400', {
-      avail: 1,
-      topics: [
-        {
-          tn: 'SystemTime',
-          parameters: [
-            { type: 18, pn: 'Time', tn: 'SystemTime', v: Math.floor(Date.now() / 1000) },
-            { type: 1, pn: 'Lot', tn: 'SystemTime', v: 720 }
-          ]
-        }
-      ]
-    })
+    build: (options) => buildSystemTimeFrame(new Date(), options?.timeZone)
   },
   {
     name: 'client-last-message',

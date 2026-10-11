@@ -47,6 +47,11 @@ Install dependencies:
 npm install
 ```
 
+For Linux / Venus OS using BlueZ only, `npm install --omit=optional` skips the
+native noble backend and its build dependencies. The BlueZ path needs Node.js,
+the running system Bluetooth service, and D-Bus access; no Python service is
+needed. Noble remains available as an optional backend for other platforms.
+
 Use Node 20 or 22 LTS for live BLE access. Newer Node releases can work for
 tests and builds, but the native noble macOS backend has been less reliable for
 Bluetooth connections outside LTS.
@@ -88,9 +93,44 @@ normal `discover`, `get`, or `set`.
 
 ### Headless Venus OS / Victron
 
-Pairing on a Victron Ekrano or GX device currently needs to be done from the
-command line. Pairing from the Node-RED device configuration is planned; see
-the TODO list below.
+Open the `truma-inetx-device` configuration, select the adapter, click **Search**,
+and select your panel. Put the panel in Bluetooth pairing mode, enter the
+six-digit code if one is shown, and click **Pair**. The pairing code is used for
+that attempt only and is never stored in the flow. Pairing uses the current
+editor selection, so it can run before deployment. Deploy afterwards and use
+**Reread** to refresh the device tree.
+
+Editor pairing requires BlueZ on Linux and permission for the Node-RED process
+to use the system Bluetooth D-Bus API. It does not change controller-wide
+settings. Panels requiring the older controller preparation can still use the
+CLI pairing path. Pairing and adapter changes need validation on your actual
+panel/firmware; automated tests use simulated devices.
+
+Adapters can be selected by MAC address (recommended, stable across hci
+renumbering), `hci0` / `hci1`, or a BlueZ object path. The same adapter is used for
+discovery, pairing, reading and writing. An explicit missing adapter fails
+instead of silently choosing another. With an adapter selected, `auto` uses
+BlueZ; explicit `noble` requires leaving the adapter blank.
+
+CLI equivalents:
+
+```sh
+npm run get -- --adapter hci1 --device-address AA:BB:CC:DD:EE:FF
+npm run pair -- --bluetooth bluez --adapter hci1 --device-address AA:BB:CC:DD:EE:FF --passkey 001234
+```
+
+A CLI passkey may be saved by shell history; the editor avoids putting it in a
+command. When a code is required, a missing or mismatched code fails pairing.
+
+### Local time
+
+`SystemTime.Time` remains Unix time in UTC. `SystemTime.Lot` now carries the local
+UTC offset in minutes, including daylight saving time (for example, Germany
+60/120, Auckland 720/780). It defaults to the Node-RED/CLI host timezone.
+Override it with an IANA timezone in the device configuration, via CLI
+`--time-zone Europe/Berlin`, or library `protocol: { timeZone: 'Europe/Berlin' }`.
+This is useful when the GX host runs in UTC; travelling users should update the
+configured timezone when necessary.
 
 ### Initial Build of Settings Tree
 
@@ -135,6 +175,21 @@ npm run set -- Switches ExternalLights 1 --tree truma-tree.json
 The write path initializes the Truma protocol to learn the assigned client
 address, then sends a single parameter write. Switch captures use numeric `1`
 and `0` values. You can also pass `--group 0405` explicitly instead of `--tree`.
+
+A successful `set()` result includes `write.status: "confirmed"` only after the
+target group reports the requested topic, parameter and value. A timeout raises
+`WriteUnconfirmedError` (`code: "TRUMA_WRITE_UNCONFIRMED"`): the write may have
+succeeded, so read it back before retrying. Writes are never automatically
+repeated, including when callers supply the legacy `readRetries` option. In
+Node-RED, unconfirmed writes use a yellow status and go to the Catch node without
+emitting a successful result.
+
+The set node validates values against cached discovery metadata (availability,
+numeric bounds and available enum choices). CLI `--tree` provides the same
+checks, and library callers can pass `metadata`. Without metadata, only basic
+value checks apply; no ranges or permission-bit meanings are guessed. Values
+remain in protocol units, such as tenths of a degree Celsius. Refresh discovery
+when the panel configuration changes.
 
 Known working controls and topic mappings are documented in
 [docs/control-examples.md](docs/control-examples.md). In particular, room
@@ -183,27 +238,42 @@ Installing this package into Node-RED registers three nodes:
 - `truma-inetx-set`: sets one topic/parameter/value. Incoming `msg.payload` may
   override with `{ "topic", "parameter", "value", "group" }`.
 
-The operational nodes serialize BLE access through the shared device node.
+The operational nodes and editor discovery/pairing actions serialize BLE access
+across all Truma device nodes in this Node-RED process. Each operation disconnects
+when finished. This does not coordinate with separate CLI processes; avoid
+running them during Node-RED polling.
+
+For room and boiler sensors on Venus OS, import
+[examples/victron-temperatures.json](examples/victron-temperatures.json). It uses
+the official Victron virtual-device nodes, converts raw temperature units once,
+and disconnects missing or stale sensors. See
+[the setup guide](docs/victron-temperatures.md).
 
 ## TODO
 
-- [ ] Add Bluetooth adapter selection (for example, `hci0` or `hci1`) to the
+- [x] Add Bluetooth adapter selection (for example, `hci0` or `hci1`) to the
   `truma-inetx-device` configuration and use it consistently for discovery,
   pairing, reads, and writes.
-- [ ] Investigate and add pairing directly from the `truma-inetx-device`
+- [x] Investigate and add pairing directly from the `truma-inetx-device`
   configuration, including entry of the code shown on the panel where required,
   so end users do not need the command line.
-- [ ] Calculate `SystemTime.Lot` from the applicable local UTC offset, including
+- [x] Calculate `SystemTime.Lot` from the applicable local UTC offset, including
   daylight saving time, instead of sending a fixed value.
-- [ ] Distinguish confirmed parameter writes from requests sent without a
+- [x] Distinguish confirmed parameter writes from requests sent without a
   matching confirmation.
-- [ ] Validate writes against discovered parameter metadata, including ranges
+- [x] Validate writes against discovered parameter metadata, including ranges
   and enum values.
-- [ ] Compare protocol findings with
+- [x] Compare protocol findings with
   [daaaaan/truma-inetx-ble](https://github.com/daaaaan/truma-inetx-ble), including
-  persistent client identity and compatibility across panels and firmware.
+  persistent client identity: see [comparison notes](docs/protocol-comparison.md).
   Keep releasing the connection after each operation so the phone app can
   continue to connect between operations.
+- [x] Provide a Node-RED / Victron temperature-sensor example without an extra
+  Python service.
+- [ ] Hardware-test pairing codes, multiple adapters, write confirmations and
+  timezone behavior on different panels/firmware.
+- [ ] Test persistent `MobileIdentity` across reconnects and phone-app usage
+  before introducing identity writes into normal sessions.
 - [ ] Coordinate testing of adapter selection, pairing, and other integration
   changes with Mathieu's Victron project using the release checklist below.
 

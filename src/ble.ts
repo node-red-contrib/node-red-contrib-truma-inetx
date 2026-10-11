@@ -1,3 +1,4 @@
+import { findBluezAdapterPath, listBluezAdapters, matchesBluezDevice, type BluezDeviceFilter, type BluetoothAdapter } from './ble/selection.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 
@@ -24,7 +25,10 @@ const requireOptional = createRequire(import.meta.url);
 
 async function loadNoble(): Promise<Noble> {
   if (noble) return noble;
-  nobleImportPromise ??= import('@abandonware/noble').then((module) => module.default);
+  nobleImportPromise ??= import('@abandonware/noble').then((module) => module.default).catch((error: unknown) => {
+    nobleImportPromise = null;
+    throw new Error(`Noble could not be loaded. On Linux use BlueZ, or install the optional @abandonware/noble package for this platform. ${error instanceof Error ? error.message : String(error)}`);
+  });
   noble = await nobleImportPromise;
   return noble;
 }
@@ -47,6 +51,8 @@ interface BluezPeripheral {
 
 export interface ConnectOptions {
   bluetooth?: BluetoothBackendName;
+  /** BlueZ adapter MAC address (preferred), hci name, or object path. */
+  adapter?: string;
   namePrefix?: string;
   deviceName?: string;
   deviceAddress?: string;
@@ -90,6 +96,7 @@ const bluezBackend: BluetoothBackend = {
 
 export async function connectToTruma({
   bluetooth = 'auto',
+  adapter,
   namePrefix = TRUMA.advertisedNamePrefix,
   deviceName,
   deviceAddress,
@@ -101,12 +108,14 @@ export async function connectToTruma({
   connectRetries = DEFAULT_CONNECT_RETRIES,
   logger = () => {}
 }: ConnectOptions = {}): Promise<TrumaSession> {
-  const backend = await selectBluetoothBackend(bluetooth, logger);
-  return backend.connect({ namePrefix, deviceName, deviceAddress, scanServiceUuid, matchServiceUuid, timeoutMs, connectTimeoutMs, discoverTimeoutMs, connectRetries, logger });
+  if (adapter && bluetooth === 'noble') throw new Error('Adapter selection requires the BlueZ backend.');
+  const backend = await selectBluetoothBackend(adapter ? 'bluez' : bluetooth, logger);
+  return backend.connect({ adapter, namePrefix, deviceName, deviceAddress, scanServiceUuid, matchServiceUuid, timeoutMs, connectTimeoutMs, discoverTimeoutMs, connectRetries, logger });
 }
 
 export async function discoverTrumaDevices({
   bluetooth = 'auto',
+  adapter,
   namePrefix = TRUMA.advertisedNamePrefix,
   deviceName,
   deviceAddress,
@@ -115,9 +124,10 @@ export async function discoverTrumaDevices({
   timeoutMs = DEFAULT_DISCOVER_TIMEOUT_MS,
   logger = () => {}
 }: ConnectOptions = {}): Promise<TrumaDiscoveredDevice[]> {
-  const backend = await selectBluetoothBackend(bluetooth, logger);
+  if (adapter && bluetooth === 'noble') throw new Error('Adapter selection requires the BlueZ backend.');
+  const backend = await selectBluetoothBackend(adapter ? 'bluez' : bluetooth, logger);
   if (backend.name === 'bluez') {
-    return discoverTrumaDevicesBluez({ namePrefix, deviceName, deviceAddress, matchServiceUuid, timeoutMs, logger });
+    return discoverTrumaDevicesBluez({ adapterSelector: adapter, namePrefix, deviceName, deviceAddress, matchServiceUuid, timeoutMs, logger });
   }
   return discoverTrumaDevicesNoble({ namePrefix, deviceName, deviceAddress, scanServiceUuid, matchServiceUuid, timeoutMs, logger });
 }
@@ -601,6 +611,7 @@ function wrapCharacteristic(characteristic: Characteristic): TrumaCharacteristic
 
 async function connectToTrumaBluez({
   namePrefix,
+  adapter: adapterSelector,
   deviceName,
   deviceAddress,
   matchServiceUuid,
@@ -610,6 +621,7 @@ async function connectToTrumaBluez({
   logger
 }: {
   namePrefix: string;
+  adapter?: string;
   deviceName?: string;
   deviceAddress?: string;
   matchServiceUuid: string | null;
@@ -628,7 +640,7 @@ async function connectToTrumaBluez({
     const objectManagerObject = await bus.getProxyObject('org.bluez', '/');
     const objectManager = objectManagerObject.getInterface('org.freedesktop.DBus.ObjectManager') as BluezObjectManager;
     const objects = await objectManager.GetManagedObjects();
-    const adapterPath = findBluezAdapterPath(objects);
+    const adapterPath = findBluezAdapterPath(objects, adapterSelector);
     if (!adapterPath) throw new Error('Could not find a BlueZ adapter via org.bluez ObjectManager.');
     logger('Bluetooth adapter powered on.');
     logger(`BlueZ backend using adapter ${adapterPath}.`);
@@ -641,7 +653,7 @@ async function connectToTrumaBluez({
 
     let device: { path: string; address: string | null };
     try {
-      device = await waitForBluezDevice({ objectManager, initialObjects: objects, namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid, timeoutMs, logger });
+      device = await waitForBluezDevice({ objectManager, initialObjects: objects, adapterPath, namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid, timeoutMs, logger });
     } finally {
       await adapter.StopDiscovery().catch((error: unknown) => logger(`Warning: could not stop BlueZ discovery: ${errorMessage(error)}`));
     }
@@ -679,6 +691,7 @@ async function connectToTrumaBluez({
 
 async function discoverTrumaDevicesBluez({
   namePrefix,
+  adapterSelector,
   deviceName,
   deviceAddress,
   matchServiceUuid,
@@ -686,6 +699,7 @@ async function discoverTrumaDevicesBluez({
   logger
 }: {
   namePrefix: string;
+  adapterSelector?: string;
   deviceName?: string;
   deviceAddress?: string;
   matchServiceUuid: string | null;
@@ -703,10 +717,10 @@ async function discoverTrumaDevicesBluez({
     const objectManagerObject = await bus.getProxyObject('org.bluez', '/');
     const objectManager = objectManagerObject.getInterface('org.freedesktop.DBus.ObjectManager') as BluezObjectManager;
     const objects = await objectManager.GetManagedObjects();
-    const adapterPath = findBluezAdapterPath(objects);
+    const adapterPath = findBluezAdapterPath(objects, adapterSelector);
     if (!adapterPath) throw new Error('Could not find a BlueZ adapter via org.bluez ObjectManager.');
 
-    addMatchingBluezDevices(devices, objects, { namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid });
+    addMatchingBluezDevices(devices, objects, { adapterPath, namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid });
 
     const adapterObject = await bus.getProxyObject('org.bluez', adapterPath);
     const adapter = adapterObject.getInterface('org.bluez.Adapter1') as BluezAdapter;
@@ -716,7 +730,7 @@ async function discoverTrumaDevicesBluez({
 
     await new Promise<void>((resolve) => {
       const onInterfacesAdded = (path: string, interfaces: Record<string, Record<string, unknown>>) => {
-        addMatchingBluezDevices(devices, { [path]: interfaces }, { namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid });
+        addMatchingBluezDevices(devices, { [path]: interfaces }, { adapterPath, namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid });
       };
       const done = () => {
         clearTimeout(timeout);
@@ -804,8 +818,9 @@ async function wrapBluezCharacteristic(bus: BluezBus, path: string, initialPrope
     },
     async write(data: Buffer, withoutResponse = false) {
       const options = withoutResponse ? { type: new (loadDbusNext().Variant)('s', 'command') } : {};
-      writeQueue = writeQueue.then(() => writeBluezValueWithRetry(characteristic, [...data], options));
-      await writeQueue;
+      const pending = writeQueue.then(() => writeBluezValueWithRetry(characteristic, [...data], options));
+      writeQueue = pending.catch(() => {});
+      await pending;
     },
     async subscribe() {
       await characteristic.StartNotify();
@@ -857,13 +872,6 @@ interface BluezProperties {
   on(event: 'PropertiesChanged', listener: (interfaceName: string, changed: Record<string, unknown>, invalidated: string[]) => void): void;
 }
 
-function findBluezAdapterPath(objects: BluezObjects): string | null {
-  for (const [path, interfaces] of Object.entries(objects)) {
-    if (interfaces['org.bluez.Adapter1']) return path;
-  }
-  return null;
-}
-
 async function setBluezDiscoveryFilter(adapter: BluezAdapter, Variant: BluezVariantConstructor, serviceUuid: string | undefined, logger: Logger): Promise<void> {
   const filters: Array<{ name: string; filter: Record<string, unknown> }> = [
     { name: 'transport', filter: { Transport: new Variant('s', 'le') } },
@@ -882,6 +890,7 @@ async function waitForBluezDevice({
   objectManager,
   initialObjects,
   namePrefix,
+  adapterPath,
   deviceName,
   deviceAddress,
   serviceUuid,
@@ -891,13 +900,14 @@ async function waitForBluezDevice({
   objectManager: BluezObjectManager;
   initialObjects: BluezObjects;
   namePrefix: string;
+  adapterPath: string;
   deviceName?: string;
   deviceAddress?: string;
   serviceUuid: string | undefined;
   timeoutMs: number;
   logger: Logger;
 }): Promise<{ path: string; address: string | null }> {
-  const initialMatch = findBluezDevice(initialObjects, { namePrefix, deviceName, deviceAddress, serviceUuid });
+  const initialMatch = findBluezDevice(initialObjects, { adapterPath, namePrefix, deviceName, deviceAddress, serviceUuid });
   if (initialMatch) return initialMatch;
 
   return new Promise((resolve, reject) => {
@@ -906,7 +916,7 @@ async function waitForBluezDevice({
       reject(new Error(`Timed out after ${timeoutMs}ms waiting for BlueZ to discover ${namePrefix}.`));
     }, timeoutMs);
     const onInterfacesAdded = (path: string, interfaces: Record<string, Record<string, unknown>>) => {
-      const match = findBluezDevice({ [path]: interfaces }, { namePrefix, deviceName, deviceAddress, serviceUuid });
+      const match = findBluezDevice({ [path]: interfaces }, { adapterPath, namePrefix, deviceName, deviceAddress, serviceUuid });
       if (!match) return;
       clearTimeout(timeout);
       objectManager.off('InterfacesAdded', onInterfacesAdded);
@@ -917,40 +927,20 @@ async function waitForBluezDevice({
   });
 }
 
-function findBluezDevice(
-  objects: BluezObjects,
-  { namePrefix, deviceName, deviceAddress, serviceUuid }: { namePrefix: string; deviceName?: string; deviceAddress?: string; serviceUuid: string | undefined }
-): { path: string; address: string | null } | null {
+function findBluezDevice(objects: BluezObjects, filter: BluezDeviceFilter): { path: string; address: string | null } | null {
   for (const [path, interfaces] of Object.entries(objects)) {
     const device = interfaces['org.bluez.Device1'];
-    if (!device) continue;
-    const name = String(unboxBluezValue(device.Name) || unboxBluezValue(device.Alias) || '');
-    const address = nullableString(unboxBluezValue(device.Address));
-    const uuids = Array.isArray(unboxBluezValue(device.UUIDs)) ? (unboxBluezValue(device.UUIDs) as unknown[]).map((uuid) => String(uuid).toLowerCase()) : [];
-    if (deviceName && name !== deviceName) continue;
-    if (deviceAddress && normalizeAddress(address) !== normalizeAddress(deviceAddress)) continue;
-    if (name.startsWith(namePrefix)) return { path, address };
-    if (serviceUuid && uuids.includes(serviceUuid.toLowerCase())) return { path, address };
+    if (device && matchesBluezDevice(path, device, filter)) return { path, address: nullableString(unboxBluezValue(device.Address)) };
   }
   return null;
 }
 
-function addMatchingBluezDevices(
-  output: Map<string, TrumaDiscoveredDevice>,
-  objects: BluezObjects,
-  { namePrefix, deviceName, deviceAddress, serviceUuid }: { namePrefix: string; deviceName?: string; deviceAddress?: string; serviceUuid: string | undefined }
-): void {
+function addMatchingBluezDevices(output: Map<string, TrumaDiscoveredDevice>, objects: BluezObjects, filter: BluezDeviceFilter): void {
   for (const [path, interfaces] of Object.entries(objects)) {
-    const bluezDevice = interfaces['org.bluez.Device1'];
-    const device = bluezDiscoveredDevice(path, bluezDevice);
-    if (!device) continue;
-    const uuidValue = unboxBluezValue(bluezDevice?.UUIDs);
-    const uuids = Array.isArray(uuidValue) ? uuidValue.map((uuid) => String(uuid).toLowerCase()) : [];
-    const name = device.name || '';
-    if (deviceName && name !== deviceName) continue;
-    if (deviceAddress && normalizeAddress(device.address) !== normalizeAddress(deviceAddress)) continue;
-    if (!name.startsWith(namePrefix) && !(serviceUuid && uuids.includes(serviceUuid.toLowerCase()))) continue;
-    output.set(deviceKey(device), device);
+    const props = interfaces['org.bluez.Device1'];
+    if (!props || !matchesBluezDevice(path, props, filter)) continue;
+    const device = bluezDiscoveredDevice(path, props);
+    if (device) output.set(deviceKey(device), device);
   }
 }
 
@@ -1093,4 +1083,16 @@ function asError(error: unknown): Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export async function discoverBluetoothAdapters(): Promise<BluetoothAdapter[]> {
+  if (process.platform !== 'linux') return [];
+  const bus = loadDbusNext().systemBus();
+  try {
+    const object = await bus.getProxyObject('org.bluez', '/');
+    const manager = object.getInterface('org.freedesktop.DBus.ObjectManager') as BluezObjectManager;
+    return listBluezAdapters(await manager.GetManagedObjects());
+  } finally {
+    bus.disconnect();
+  }
 }

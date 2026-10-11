@@ -42,7 +42,6 @@
     "test": "npm run build && node --test"
   },
   "dependencies": {
-    "@abandonware/noble": "^1.9.2-26",
     "cbor-x": "^1.6.4",
     "commander": "^15.0.0",
     "dbus-next": "^0.10.2"
@@ -67,5 +66,8 @@
     "bluetooth",
     "ble"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "optionalDependencies": {
+    "@abandonware/noble": "^1.9.2-26"
+  }
 }

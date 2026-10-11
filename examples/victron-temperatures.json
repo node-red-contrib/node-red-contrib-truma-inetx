@@ -1,0 +1,181 @@
+[
+  {
+    "id": "truma-temp-tab",
+    "type": "tab",
+    "label": "Truma → Victron temperatures",
+    "disabled": false,
+    "info": "Configure the Truma device first. Requires Venus OS with the official victron-virtual temperature node and connected-message support. See docs/victron-temperatures.md."
+  },
+  {
+    "id": "truma-temp-note",
+    "type": "comment",
+    "z": "truma-temp-tab",
+    "name": "Configure/pair Truma first • raw °C × 10 • no Python service",
+    "info": "Use AirHeating.Temp and WaterHeating.Temp from fresh results. Default poll is 120s; stale readings disconnect after 5 minutes. Do not run alongside an existing poller; wire its fresh results to the converter instead.",
+    "x": 350,
+    "y": 60,
+    "wires": []
+  },
+  {
+    "id": "truma-temp-device",
+    "type": "truma-inetx-device",
+    "name": "Configure your Truma panel",
+    "bluetooth": "bluez",
+    "adapter": "",
+    "timeZone": "",
+    "targetMode": "first",
+    "deviceName": "",
+    "deviceAddress": ""
+  },
+  {
+    "id": "truma-temp-poll",
+    "type": "inject",
+    "z": "truma-temp-tab",
+    "name": "Poll every 120s",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "120",
+    "once": false,
+    "onceDelay": 10,
+    "payload": "",
+    "payloadType": "str",
+    "x": 140,
+    "y": 140,
+    "wires": [
+      [
+        "truma-temp-gate"
+      ]
+    ]
+  },
+  {
+    "id": "truma-temp-gate",
+    "type": "function",
+    "z": "truma-temp-tab",
+    "name": "Skip overlapping reads",
+    "func": "if (flow.get('trumaTemperatureReadBusy')) return null;\nflow.set('trumaTemperatureReadBusy', true);\nreturn msg;",
+    "initialize": "flow.set('trumaTemperatureReadBusy', false);",
+    "outputs": 1,
+    "x": 380,
+    "y": 140,
+    "wires": [
+      [
+        "truma-temp-read"
+      ]
+    ]
+  },
+  {
+    "id": "truma-temp-read",
+    "type": "truma-inetx-get",
+    "z": "truma-temp-tab",
+    "name": "Fresh temperatures",
+    "device": "truma-temp-device",
+    "topics": "AirHeating,WaterHeating",
+    "x": 630,
+    "y": 140,
+    "wires": [
+      [
+        "truma-temp-convert"
+      ]
+    ]
+  },
+  {
+    "id": "truma-temp-error",
+    "type": "catch",
+    "z": "truma-temp-tab",
+    "name": "Read failed → offline",
+    "scope": [
+      "truma-temp-read"
+    ],
+    "uncaught": false,
+    "x": 630,
+    "y": 200,
+    "wires": [
+      [
+        "truma-temp-convert"
+      ]
+    ]
+  },
+  {
+    "id": "truma-temp-stale",
+    "type": "inject",
+    "z": "truma-temp-tab",
+    "name": "Check freshness every 30s",
+    "props": [
+      {
+        "p": "kind",
+        "v": "tick",
+        "vt": "str"
+      }
+    ],
+    "repeat": "30",
+    "once": true,
+    "onceDelay": 1,
+    "x": 630,
+    "y": 260,
+    "wires": [
+      [
+        "truma-temp-convert"
+      ]
+    ]
+  },
+  {
+    "id": "truma-temp-convert",
+    "type": "function",
+    "z": "truma-temp-tab",
+    "name": "Convert °C / expire stale sensors",
+    "func": "// Raw Truma temperatures are tenths of a degree Celsius.\n// Feed fresh get-node results here, never the merged discovery cache.\nconst now = Date.now();\nconst staleAfterMs = 5 * 60 * 1000;\nconst names = ['AirHeating', 'WaterHeating'];\nlet state = context.get('sensors') || [{ last: 0, online: false }, { last: 0, online: false }];\nconst output = [null, null];\nif (msg.kind !== 'tick') flow.set('trumaTemperatureReadBusy', false);\nfor (let i = 0; i < names.length; i++) {\n  if (msg.kind !== 'tick' && !msg.error) {\n    const parameter = msg.payload?.topics?.[names[i]]?.parameters?.Temp;\n    const raw = parameter?.value;\n    const valid = parameter?.available !== 0 && parameter?.available !== false &&\n      typeof raw === 'number' && Number.isFinite(raw) && raw >= -500 && raw <= 1500;\n    if (valid) {\n      output[i] = [{ payload: { '/Temperature': raw / 10, '/Status': 0 } }, { connected: true }];\n      state[i] = { last: now, online: true };\n      continue;\n    }\n    state[i].last = 0;\n  }\n  if (msg.error || !state[i].last || now - state[i].last >= staleAfterMs) {\n    output[i] = { connected: false };\n    state[i] = { last: 0, online: false };\n  }\n}\ncontext.set('sensors', state);\nreturn output;\n",
+    "initialize": "context.set('sensors', null);",
+    "outputs": 2,
+    "x": 930,
+    "y": 180,
+    "wires": [
+      [
+        "truma-temp-room"
+      ],
+      [
+        "truma-temp-water"
+      ]
+    ]
+  },
+  {
+    "id": "truma-temp-room",
+    "type": "victron-virtual",
+    "z": "truma-temp-tab",
+    "name": "Truma room",
+    "device": "temperature",
+    "temperature_type": 3,
+    "default_values": false,
+    "start_disconnected": true,
+    "include_humidity": false,
+    "include_pressure": false,
+    "include_temp_battery": false,
+    "outputs": 1,
+    "x": 1220,
+    "y": 140,
+    "wires": [
+      []
+    ]
+  },
+  {
+    "id": "truma-temp-water",
+    "type": "victron-virtual",
+    "z": "truma-temp-tab",
+    "name": "Truma boiler",
+    "device": "temperature",
+    "temperature_type": 5,
+    "default_values": false,
+    "start_disconnected": true,
+    "include_humidity": false,
+    "include_pressure": false,
+    "include_temp_battery": false,
+    "outputs": 1,
+    "x": 1220,
+    "y": 220,
+    "wires": [
+      []
+    ]
+  }
+]

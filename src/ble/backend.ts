@@ -4,6 +4,7 @@ export type BluetoothBackendName = 'auto' | 'bluez' | 'noble';
 
 export interface ResolvedConnectOptions {
   namePrefix: string;
+  adapter?: string;
   deviceName?: string;
   deviceAddress?: string;
   scanServiceUuid: string | null;
