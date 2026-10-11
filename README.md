@@ -8,6 +8,23 @@ payloads with `cbor-x`, and prints parsed settings as JSON. Bluetooth access is
 backend based: `auto` tries BlueZ on Linux and falls back to noble elsewhere,
 while `bluez` and `noble` can be selected explicitly.
 
+The connection is intentionally released after each read, discovery, or write
+operation. This leaves the panel available for the Truma phone app between
+Node-RED operations, instead of occupying its Bluetooth connection continuously.
+Allow time between polling requests so the phone app can connect.
+
+## Related project
+
+[daaaaan/truma-inetx-ble](https://github.com/daaaaan/truma-inetx-ble) is an
+alternative Python implementation with Home Assistant integration, MQTT, and a
+standalone service for Victron Cerbo GX / Venus OS. It may be a useful option if
+you prefer a Home Assistant / Python solution to a Node-RED integration.
+
+The two projects were developed independently. We discovered that project by
+chance after developing this implementation; its development started earlier.
+Sharing protocol findings and interoperability experiences could help both
+projects support more Truma setups.
+
 ## Usage
 
 Install dependencies:
@@ -57,7 +74,9 @@ normal `discover`, `get`, or `set`.
 
 ### Headless Venus OS / Victron
 
-The pairing on an victron ekrano or GX device need to be currently done by the command line.
+Pairing on a Victron Ekrano or GX device currently needs to be done from the
+command line. Pairing from the Node-RED device configuration is planned; see
+the TODO list below.
 
 ### Initial Build of Settings Tree
 
@@ -151,3 +170,23 @@ Installing this package into Node-RED registers three nodes:
   override with `{ "topic", "parameter", "value", "group" }`.
 
 The operational nodes serialize BLE access through the shared device node.
+
+## TODO
+
+- [ ] Add Bluetooth adapter selection (for example, `hci0` or `hci1`) to the
+  `truma-inetx-device` configuration and use it consistently for discovery,
+  pairing, reads, and writes.
+- [ ] Investigate and add pairing directly from the `truma-inetx-device`
+  configuration, including entry of the code shown on the panel where required,
+  so end users do not need the command line.
+- [ ] Calculate `SystemTime.Lot` from the applicable local UTC offset, including
+  daylight saving time, instead of sending a fixed value.
+- [ ] Distinguish confirmed parameter writes from requests sent without a
+  matching confirmation.
+- [ ] Validate writes against discovered parameter metadata, including ranges
+  and enum values.
+- [ ] Compare protocol findings with
+  [daaaaan/truma-inetx-ble](https://github.com/daaaaan/truma-inetx-ble), including
+  persistent client identity and compatibility across panels and firmware.
+  Keep releasing the connection after each operation so the phone app can
+  continue to connect between operations.
