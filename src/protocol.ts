@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { buildParameterWriteFrame, decodeFirstCbor, type TrumaValue } from './truma-frame.js';
@@ -23,12 +24,13 @@ export interface TrumaCharacteristics {
 export interface TrumaProtocolOptions {
   logger?: (message: string) => void;
   timings?: Partial<typeof DEFAULT_TIMINGS>;
+  timeZone?: string;
 }
 
 export interface ReadRequest {
   name: string;
   hex?: string;
-  build?: () => Buffer;
+  build?: (options?: { timeZone?: string }) => Buffer;
   addressMode?: 'source-client' | 'client-local';
   dynamic?: 'device-groups';
   topics?: string[];
@@ -84,8 +86,11 @@ export class TrumaProtocol {
   private clientAddress: number | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
   private isStarted = false;
+  private readonly timeZone?: string;
 
-  constructor(characteristics: TrumaCharacteristics, { logger = () => {}, timings = {} }: TrumaProtocolOptions = {}) {
+  constructor(characteristics: TrumaCharacteristics, { logger = () => {}, timings = {}, timeZone }: TrumaProtocolOptions = {}) {
+    if (timeZone) new Intl.DateTimeFormat('en-US', { timeZone });
+    this.timeZone = timeZone;
     this.control = characteristics.control;
     this.write = characteristics.write;
     this.data = characteristics.data;
@@ -134,7 +139,7 @@ export class TrumaProtocol {
         }
 
         if (!request.hex && !request.build) throw new Error(`Read request ${request.name} does not define a payload.`);
-        const payload = request.build ? request.build() : Buffer.from(request.hex || '', 'hex');
+        const payload = request.build ? request.build({ timeZone: this.timeZone }) : Buffer.from(request.hex || '', 'hex');
         this.log(`Sending ${request.name} (${payload.length} bytes)`);
         await this.sendFrame(payload, request);
         await delay(this.timings.pipelineSettleMs);
@@ -154,7 +159,7 @@ export class TrumaProtocol {
 
     const request = READ_SEQUENCE[0];
     if (!request.hex && !request.build) throw new Error('Protocol-version request does not define a payload.');
-    const payload = request.build ? request.build() : Buffer.from(request.hex || '', 'hex');
+    const payload = request.build ? request.build({ timeZone: this.timeZone }) : Buffer.from(request.hex || '', 'hex');
     this.log(`Sending ${request.name} (${payload.length} bytes)`);
     await this.sendFrame(payload, request);
     await this.waitForClientAddress(this.timings.clientAddressTimeoutMs);
@@ -168,24 +173,32 @@ export class TrumaProtocol {
 
     const responseStartIndex = this.responseBuffers.length;
     const payload = buildParameterWriteFrame(targetGroup, topicName, parameterName, value);
-    await this.sendFrame(payload, {
-      name: `set-${topicName}-${parameterName}`,
-      addressMode: 'source-client'
-    });
-
-    await this.waitForParameterResponse(topicName, parameterName, responseStartIndex, this.timings.writeConfirmationTimeoutMs);
+    let writeAttempted = false;
+    try {
+      await this.sendFrame(payload, {
+        name: `set-${topicName}-${parameterName}`,
+        addressMode: 'source-client'
+      }, () => { writeAttempted = true; });
+      await this.waitForParameterResponse(topicName, parameterName, responseStartIndex, this.timings.writeConfirmationTimeoutMs, value, targetGroup);
+    } catch (error) {
+      // A GATT failure after submission cannot establish whether the device applied it.
+      if (writeAttempted && !(error instanceof WriteUnconfirmedError)) throw new WriteUnconfirmedError(topicName, parameterName, { cause: error });
+      throw error;
+    }
     await this.flushCurrentResponse();
     const responses = this.getResponseBuffers().slice(responseStartIndex);
-    const matchingResponses = responses.filter((response) => responseMatchesParameter(response, topicName, parameterName));
-    return matchingResponses.length ? matchingResponses : responses;
+    const matchingResponses = responses.filter((response) => responseMatchesParameter(response, topicName, parameterName, value, targetGroup));
+    if (!matchingResponses.length) throw new WriteUnconfirmedError(topicName, parameterName);
+    return matchingResponses;
   }
 
-  async sendFrame(payload: Buffer, request: ReadRequest = { name: '<anonymous>' }) {
+  async sendFrame(payload: Buffer, request: ReadRequest = { name: '<anonymous>' }, onPayloadWrite?: () => void) {
     const responseCountBeforeWrite = this.responseBuffers.length;
     const pendingCountBeforeWrite = this.pendingResponseCount;
     const announce = Buffer.from([0x01, payload.length & 0xff, (payload.length >> 8) & 0xff]);
     this.log(`Writing control announce: ${announce.toString('hex')}`);
     const ready = this.waitForControlNotification('8100', this.timings.readyTimeoutMs);
+    void ready.catch(() => {});
     await this.control.write(announce, false);
     await ready;
     this.log(`Control ready received for ${request.name}.`);
@@ -193,6 +206,9 @@ export class TrumaProtocol {
     payload = this.applyClientAddress(payload, request.addressMode);
     this.log(`Writing data frame (${payload.length} bytes): ${payload.toString('hex')}`);
     const accepted = this.waitForControlNotification('f001', this.timings.acceptedTimeoutMs);
+    // Attach a rejection handler even if the GATT write itself fails first.
+    void accepted.catch(() => {});
+    onPayloadWrite?.();
     await this.write.write(payload, true);
     try {
       await accepted;
@@ -549,13 +565,13 @@ export class TrumaProtocol {
     }
   }
 
-  async waitForParameterResponse(topicName: string, parameterName: string, startIndex: number, timeoutMs: number): Promise<void> {
+  async waitForParameterResponse(topicName: string, parameterName: string, startIndex: number, timeoutMs: number, value: TrumaValue, targetGroup: number): Promise<void> {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
-      if (this.getResponseBuffers().slice(startIndex).some((response) => responseMatchesParameter(response, topicName, parameterName))) return;
+      if (this.getResponseBuffers().slice(startIndex).some((response) => responseMatchesParameter(response, topicName, parameterName, value, targetGroup))) return;
       await delay(25);
     }
-    this.log(`Timed out after ${timeoutMs}ms waiting for confirmation of ${topicName}.${parameterName}; returning collected write responses.`);
+    throw new WriteUnconfirmedError(topicName, parameterName);
   }
 
   resolveControlWaiters(hex: string) {
@@ -612,15 +628,25 @@ function expectedTrumaFrameLength(data: Buffer): number | null {
   return declaredBodyLength + 7;
 }
 
-function responseMatchesParameter(response: Buffer, topicName: string, parameterName: string): boolean {
+export class WriteUnconfirmedError extends Error {
+  readonly code = 'TRUMA_WRITE_UNCONFIRMED';
+  constructor(topic: string, parameter: string, options?: ErrorOptions) {
+    super(`Attempted ${topic}.${parameter}, but did not confirm its requested value from the target device. The write may have succeeded; read back before retrying.`, options);
+    this.name = 'WriteUnconfirmedError';
+  }
+}
+
+function responseMatchesParameter(response: Buffer, topicName: string, parameterName: string, value: TrumaValue, targetGroup: number): boolean {
+  const expectedLength = expectedTrumaFrameLength(response);
+  if (!expectedLength || response.length < expectedLength || response.length < 18 || response.readUInt16LE(2) !== targetGroup) return false;
   const decoded = decodeFirstCbor(response);
   const candidate = Array.isArray(decoded) && decoded.length >= 2 ? decoded[1] : decoded;
 
-  if (isRecord(candidate) && candidate.tn === topicName && candidate.pn === parameterName) return true;
+  if (isRecord(candidate) && candidate.tn === topicName && candidate.pn === parameterName && isDeepStrictEqual(candidate.v, value)) return true;
   if (isRecord(candidate) && Array.isArray(candidate.topics)) {
     return candidate.topics.some((topic) => {
       if (!isRecord(topic) || topic.tn !== topicName || !Array.isArray(topic.parameters)) return false;
-      return topic.parameters.some((parameter) => isRecord(parameter) && parameter.pn === parameterName);
+      return topic.parameters.some((parameter) => isRecord(parameter) && parameter.pn === parameterName && isDeepStrictEqual(parameter.v, value));
     });
   }
 

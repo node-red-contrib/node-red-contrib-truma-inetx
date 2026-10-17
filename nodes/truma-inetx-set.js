@@ -14,28 +14,29 @@ module.exports = function registerTrumaSetNode(RED) {
         const override = normalizePayload(msg.payload);
         const topic = override.topic ?? node.topic;
         const parameter = override.parameter ?? node.parameter;
-        const value = override.value ?? parseSetValue(node.value);
+        const value = override.value !== undefined ? override.value : parseSetValue(node.value);
         if (!topic) throw new Error('No Truma topic configured.');
         if (!parameter) throw new Error('No Truma parameter configured.');
         node.status({ fill: 'yellow', shape: 'ring', text: 'writing' });
         const targetGroup = override.group ?? (await node.device.groupForTopic(topic));
-        const result = await node.device.enqueue((truma) =>
+        const result = await node.device.enqueue((truma, tree) =>
           truma.set({
             ...node.device.connectOptions(),
             logger: (message) => node.device.logDebug(message),
             targetGroup,
             topic,
             parameter,
-            value
+            value,
+            metadata: tree?.topics?.[topic]?.parameters?.[parameter]
           })
         );
         node.device.mergeTree(result);
-        node.status({ fill: 'green', shape: 'dot', text: 'written' });
+        node.status({ fill: 'green', shape: 'dot', text: 'confirmed' });
         msg.payload = result;
         emit(msg);
         done?.();
       } catch (error) {
-        node.status({ fill: 'red', shape: 'ring', text: 'error' });
+        node.status({ fill: error.code === 'TRUMA_WRITE_UNCONFIRMED' ? 'yellow' : 'red', shape: 'ring', text: error.code === 'TRUMA_WRITE_UNCONFIRMED' ? 'unconfirmed — read back' : 'error' });
         done ? done(error) : node.error(error, msg);
       }
     });

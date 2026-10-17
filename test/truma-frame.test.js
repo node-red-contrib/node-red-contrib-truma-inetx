@@ -29,12 +29,14 @@ test('builds Truma frames with a valid binary header', () => {
 
 test('builds compact CBOR frames compatible with captured Truma packets', () => {
   const request = READ_SEQUENCE.find((item) => item.name === 'client-system-time');
-  const frame = request.build();
-
-  assert.equal(frame.length, 130);
-  assert.equal(parseTrumaHeader(frame).bodyLength, 123);
-  assert.equal(frame.includes(Buffer.from('b900', 'hex')), false);
-  assert.equal(frame[18], 0xa2);
+  // Offset integer widths differ: UTC=0, Berlin=60/120, Auckland=720/780.
+  for (const [timeZone, length] of [['UTC', 128], ['Europe/Berlin', 129], ['Pacific/Auckland', 130]]) {
+    const frame = request.build({ timeZone });
+    assert.equal(frame.length, length);
+    assert.equal(parseTrumaHeader(frame).bodyLength, length - 7);
+    assert.equal(frame.includes(Buffer.from('b900', 'hex')), false);
+    assert.equal(frame[18], 0xa2);
+  }
   assert.equal(TRUMA.advertisedNamePrefix, 'Truma iNetX');
 });
 

@@ -11,6 +11,9 @@ type Logger = (message: string) => void;
 interface GlobalCliOptions {
   bluetooth: BluetoothBackendName;
   debug?: boolean;
+  adapter?: string;
+  deviceAddress?: string;
+  timeZone?: string;
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
@@ -22,6 +25,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     .description('Read and write Truma iNet X settings over Bluetooth LE.')
     .showHelpAfterError()
     .addOption(new Option('--bluetooth <backend>', 'Bluetooth backend').choices(['auto', 'bluez', 'noble']).default('auto'))
+    .option('--adapter <adapter>', 'BlueZ adapter MAC address, hci name or object path')
+    .option('--device-address <address>', 'target panel Bluetooth MAC address')
+    .option('--time-zone <zone>', 'IANA timezone for SystemTime.Lot; defaults to the host timezone')
     .option('--debug', 'print Bluetooth/protocol diagnostics to stderr');
 
   program
@@ -29,7 +35,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     .description('Discover the dynamic Truma topic tree and group mapping.')
     .action(async () => {
       const globals = globalOptions(program);
-      const result = await discover({ connectRetries: 3, logger: loggerFor(globals), bluetooth: globals.bluetooth });
+      const result = await discover({ connectRetries: 3, logger: loggerFor(globals), ...connectionOptions(globals) });
       await writeJson(result);
     });
 
@@ -43,7 +49,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       const result = await get({
         connectRetries: 3,
         logger: loggerFor(globals),
-        bluetooth: globals.bluetooth,
+        ...connectionOptions(globals),
         ...(selectedTopics.length ? { topics: selectedTopics } : {})
       });
       await writeJson(result);
@@ -64,11 +70,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       const result = await set({
         connectRetries: 3,
         logger: loggerFor(globals),
-        bluetooth: globals.bluetooth,
+        ...connectionOptions(globals),
         targetGroup,
         topic,
         parameter,
-        value: parseSetValue(rawValue)
+        value: parseSetValue(rawValue),
+        metadata: tree?.topics[topic]?.parameters[parameter]
       });
       await writeJson(result);
     });
@@ -76,14 +83,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   program
     .command('pair')
     .description('Pair with a Truma iNet X while the display is in Bluetooth pairing mode.')
-    .action(async () => {
+    .option('--passkey <code>', 'six-digit code shown on the panel (may be saved by shell history)')
+    .action(async (options: { passkey?: string }) => {
       const globals = globalOptions(program);
       const result = await pair({
         connectRetries: 3,
         logger: loggerFor(globals),
-        bluetooth: globals.bluetooth,
+        ...connectionOptions(globals),
         holdMs: 30000,
-        linuxAgentCapability: 'NoInputNoOutput',
+        passkey: options.passkey,
         linuxLegacyPowerCycle: false,
         linuxDisablePrivacy: false
       });
@@ -99,6 +107,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
 function globalOptions(program: Command): GlobalCliOptions {
   return program.opts<GlobalCliOptions>();
+}
+
+function connectionOptions(options: GlobalCliOptions) {
+  return { bluetooth: options.bluetooth, adapter: options.adapter, deviceAddress: options.deviceAddress,
+    protocol: { timeZone: options.timeZone } };
 }
 
 function loggerFor({ debug }: GlobalCliOptions): Logger {
