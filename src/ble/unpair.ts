@@ -1,4 +1,4 @@
-import { findBluezAdapterPath, matchesBluezDevice, type BluezObjects } from './selection.js';
+import { findBluezAdapterPath, findBluezDevice, type BluezObjects } from './selection.js';
 
 export interface UnpairOptions {
   adapter: string;
@@ -22,10 +22,7 @@ export async function removeBluezDevice(bus: RemovalBus, options: UnpairOptions)
     const manager = (await bus.getProxyObject('org.bluez', '/')).getInterface('org.freedesktop.DBus.ObjectManager') as { GetManagedObjects(): Promise<BluezObjects> };
     const objects = await manager.GetManagedObjects();
     const adapter = findBluezAdapterPath(objects, options.adapter)!;
-    const devicePath = Object.keys(objects).find((path) => {
-      const device = objects[path]?.['org.bluez.Device1'];
-      return device && matchesBluezDevice(path, device, { adapterPath: adapter, deviceAddress: options.deviceAddress, namePrefix: '', serviceUuid: undefined });
-    });
+    const devicePath = findBluezDevice(objects, { adapterPath: adapter, deviceAddress: options.deviceAddress, namePrefix: '', serviceUuid: undefined })?.path;
     if (!devicePath) return { status: 'not-found', adapter, deviceAddress: options.deviceAddress };
     const controller = (await bus.getProxyObject('org.bluez', adapter)).getInterface('org.bluez.Adapter1') as { RemoveDevice(path: string): Promise<void> };
     await controller.RemoveDevice(devicePath);

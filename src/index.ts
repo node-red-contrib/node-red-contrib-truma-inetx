@@ -1,4 +1,4 @@
-import { findBluezAdapterPath, matchesBluezDevice, type BluezDeviceFilter } from './ble/selection.js';
+import { findBluezDevice, findBluezAdapterPath, type BluezDeviceFilter } from './ble/selection.js';
 import { validateParameterValue } from './validation.js';
 import { removeBluezDevice, validateUnpairOptions, type UnpairOptions } from './ble/unpair.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -813,13 +813,6 @@ async function waitForBluezDevice({
   });
 }
 
-function findBluezDevice(objects: BluezObjects, filter: BluezDeviceFilter): { path: string; address: string | null } | null {
-  for (const [path, interfaces] of Object.entries(objects)) {
-    const device = interfaces['org.bluez.Device1'];
-    if (device && matchesBluezDevice(path, device, filter)) return { path, address: nullableString(unboxBluezValue(device.Address)) };
-  }
-  return null;
-}
 
 async function getBluezBoolean(properties: BluezProperties, interfaceName: string, propertyName: string): Promise<boolean | null> {
   const value = await properties.Get(interfaceName, propertyName).catch(() => null);

@@ -1,4 +1,4 @@
-import { findBluezAdapterPath, listBluezAdapters, matchesBluezDevice, type BluezDeviceFilter, type BluetoothAdapter } from './ble/selection.js';
+import { findBluezDevice, findBluezAdapterPath, listBluezAdapters, matchesBluezDevice, type BluezDeviceFilter, type BluetoothAdapter } from './ble/selection.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createRequire } from 'node:module';
 
@@ -947,20 +947,16 @@ async function waitForBluezDevice({
   });
 }
 
-function findBluezDevice(objects: BluezObjects, filter: BluezDeviceFilter): { path: string; address: string | null } | null {
-  for (const [path, interfaces] of Object.entries(objects)) {
-    const device = interfaces['org.bluez.Device1'];
-    if (device && matchesBluezDevice(path, device, filter)) return { path, address: nullableString(unboxBluezValue(device.Address)) };
-  }
-  return null;
-}
 
 function addMatchingBluezDevices(output: Map<string, TrumaDiscoveredDevice>, objects: BluezObjects, filter: BluezDeviceFilter): void {
   for (const [path, interfaces] of Object.entries(objects)) {
     const props = interfaces['org.bluez.Device1'];
     if (!props || !matchesBluezDevice(path, props, filter)) continue;
     const device = bluezDiscoveredDevice(path, props);
-    if (device) output.set(deviceKey(device), device);
+    if (device) {
+      const existing = output.get(deviceKey(device));
+      if (!existing || existing.paired !== true || device.paired === true) output.set(deviceKey(device), device);
+    }
   }
 }
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildSystemTimeFrame, utcOffsetMinutes, decodeFirstCbor, validateParameterValue, validatePairingCode, createBluezAgentInterface } from '../dist/index.js';
-import { findBluezAdapterPath, listBluezAdapters, matchesBluezDevice } from '../dist/ble/selection.js';
+import { findBluezDevice, findBluezAdapterPath, listBluezAdapters, matchesBluezDevice } from '../dist/ble/selection.js';
 
 const objects = {
   '/org/bluez/hci1': { 'org.bluez.Adapter1': { Address: { value: 'BB:BB:BB:BB:BB:BB' }, Powered: { value: true } } },
@@ -73,4 +73,12 @@ test('pairing agent preserves leading zeroes, checks confirmation and rejects ot
   const NoCodeAgent = createBluezAgentInterface(Interface, () => {}, '/selected');
   assert.throws(() => new NoCodeAgent().RequestPasskey('/selected'), /six-digit code/);
   for (const code of ['12345', '1234567', '12abcd', 123456, null]) assert.throws(() => validatePairingCode(code), /six digits/);
+});
+
+test('resolved paired identity wins over a stale random-address object regardless of enumeration order', () => {
+  const stale = ['/org/bluez/hci0/random', { 'org.bluez.Device1': { Address: { value: 'FC:A8:9B:57:E6:C1' }, Paired: { value: false } } }];
+  const paired = ['/org/bluez/hci0/public', { 'org.bluez.Device1': { Address: { value: 'FC:A8:9B:57:E6:C1' }, Paired: { value: true } } }];
+  for (const entries of [[stale, paired], [paired, stale]]) {
+    assert.equal(findBluezDevice(Object.fromEntries(entries), { adapterPath: '/org/bluez/hci0', deviceAddress: 'FC:A8:9B:57:E6:C1', namePrefix: 'Truma' }).path, paired[0]);
+  }
 });

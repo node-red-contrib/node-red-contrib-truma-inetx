@@ -45,3 +45,16 @@ export function matchesBluezDevice(path: string, device: Record<string, unknown>
   const uuids = unbox(device.UUIDs);
   return name.startsWith(filter.namePrefix) || !!(filter.serviceUuid && Array.isArray(uuids) && uuids.some((uuid) => String(uuid).toLowerCase() === filter.serviceUuid?.toLowerCase()));
 }
+
+/** BlueZ can retain both a random-address object and its resolved identity. */
+export function findBluezDevice(objects: BluezObjects, filter: BluezDeviceFilter): { path: string; address: string | null } | null {
+  const matches = Object.entries(objects).filter(([path, interfaces]) => {
+    const device = interfaces['org.bluez.Device1'];
+    return device && matchesBluezDevice(path, device, filter);
+  });
+  matches.sort(([, left], [, right]) => Number(unbox(right['org.bluez.Device1'].Paired) === true) - Number(unbox(left['org.bluez.Device1'].Paired) === true));
+  if (!matches.length) return null;
+  const [path, interfaces] = matches[0];
+  const address = unbox(interfaces['org.bluez.Device1'].Address);
+  return { path, address: typeof address === 'string' ? address : null };
+}
