@@ -109,6 +109,11 @@ stored bond, which can remain after deleting pairing on the panel. A stale publi
 identity address and a new unpaired random address may therefore appear with the
 same name; the name alone does not prove they are the same physical device.
 
+Bluetooth closes after each request, including failed connection setup or reads,
+so the phone can connect between requests. There is no idle keep-open period.
+Pair first: reading an unpaired BlueZ device reports an error instead of opening
+a connection that waits for pairing.
+
 Editor pairing requires BlueZ on Linux and permission for the Node-RED process
 to use the system Bluetooth D-Bus API. It does not change controller-wide
 settings. Panels requiring the older controller preparation can still use the

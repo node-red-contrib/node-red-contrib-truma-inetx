@@ -93,8 +93,12 @@ module.exports = function registerTrumaDeviceNode(RED) {
     };
 
     node.ensureTopics = async (topics) => {
+      await node.ready;
       const missing = node.missingTopics(topics);
       if (missing.length === 0) return [];
+      // With no topology, get() can discover groups in its own session. Avoid another
+      // full discovery before every read when initial discovery already failed.
+      if (!node.tree) return missing;
       await node.refreshTree();
       return node.missingTopics(topics);
     };

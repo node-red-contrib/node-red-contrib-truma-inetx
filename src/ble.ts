@@ -637,6 +637,21 @@ async function connectToTrumaBluez({
   const normalizedServiceUuid = matchServiceUuid ? normalizeUuid(matchServiceUuid) : undefined;
   const canonicalServiceUuid = normalizedServiceUuid ? formatCanonicalUuid(normalizedServiceUuid) : undefined;
 
+  let selectedDevice: BluezDevice | null = null;
+  let cleanup: Promise<void> | null = null;
+  const disconnect = () => cleanup ??= (async () => {
+    try {
+      if (selectedDevice) {
+        await withTimeout(selectedDevice.Disconnect(), DISCONNECT_TIMEOUT_MS, 'BlueZ Device1.Disconnect()');
+        logger('Bluetooth disconnected after request.');
+      }
+    } catch (error) {
+      logger(`Warning: Bluetooth disconnect failed: ${errorMessage(error)}`);
+    } finally {
+      bus.disconnect();
+    }
+  })();
+
   try {
     const objectManagerObject = await bus.getProxyObject('org.bluez', '/');
     const objectManager = objectManagerObject.getInterface('org.freedesktop.DBus.ObjectManager') as BluezObjectManager;
@@ -656,13 +671,17 @@ async function connectToTrumaBluez({
     try {
       device = await waitForBluezDevice({ objectManager, initialObjects: objects, adapterPath, namePrefix, deviceName, deviceAddress, serviceUuid: canonicalServiceUuid, timeoutMs, logger });
     } finally {
-      await adapter.StopDiscovery().catch((error: unknown) => logger(`Warning: could not stop BlueZ discovery: ${errorMessage(error)}`));
+      await withTimeout(adapter.StopDiscovery(), DISCONNECT_TIMEOUT_MS, 'BlueZ StopDiscovery()').catch((error: unknown) => logger(`Warning: could not stop BlueZ discovery: ${errorMessage(error)}`));
     }
 
     logger(`BlueZ connecting to ${device.address || '<unknown address>'} at ${device.path}.`);
     const deviceObject = await bus.getProxyObject('org.bluez', device.path);
     const bluezDevice = deviceObject.getInterface('org.bluez.Device1') as BluezDevice;
+    selectedDevice = bluezDevice;
     const deviceProperties = deviceObject.getInterface('org.freedesktop.DBus.Properties') as BluezProperties;
+    if (!(await getBluezBoolean(deviceProperties, 'org.bluez.Device1', 'Paired'))) {
+      throw new Error('Truma is not paired on this host. Select the current device and click Pair before reading topics.');
+    }
     if (!(await getBluezBoolean(deviceProperties, 'org.bluez.Device1', 'Connected'))) {
       await withTimeout(bluezDevice.Connect(), connectTimeoutMs, 'BlueZ Device1.Connect()');
     }
@@ -676,8 +695,8 @@ async function connectToTrumaBluez({
         bluez: true,
         state: 'connected',
         disconnect: async () => {
-          await bluezDevice.Disconnect().catch(() => {});
-          bus.disconnect();
+          await disconnect();
+          session.peripheral.state = 'disconnected';
         }
       },
       characteristics
@@ -685,7 +704,7 @@ async function connectToTrumaBluez({
     activeBluezSession = session;
     return session;
   } catch (error) {
-    bus.disconnect();
+    await disconnect();
     throw error;
   }
 }
@@ -814,7 +833,7 @@ async function wrapBluezCharacteristic(bus: BluezBus, path: string, initialPrope
     uuid: normalizeUuid(String(unboxBluezValue(initialProperties.UUID) || '')),
     properties: flags,
     async read() {
-      const value = await characteristic.ReadValue({});
+      const value = await withTimeout(characteristic.ReadValue({}), 10000, 'BlueZ GATT read');
       return Buffer.from(value);
     },
     async write(data: Buffer, withoutResponse = false) {
@@ -824,7 +843,7 @@ async function wrapBluezCharacteristic(bus: BluezBus, path: string, initialPrope
       await pending;
     },
     async subscribe() {
-      await characteristic.StartNotify();
+      await withTimeout(characteristic.StartNotify(), 10000, 'BlueZ GATT subscription');
     },
     onData(listener: (data: Buffer) => void) {
       listeners.add(listener);
@@ -914,7 +933,7 @@ async function waitForBluezDevice({
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       objectManager.off('InterfacesAdded', onInterfacesAdded);
-      reject(new Error(`Timed out after ${timeoutMs}ms waiting for BlueZ to discover ${namePrefix}.`));
+      reject(new Error(`Timed out after ${timeoutMs}ms waiting for BlueZ to discover ${deviceAddress || deviceName || namePrefix}. Search and select the current device address.`));
     }, timeoutMs);
     const onInterfacesAdded = (path: string, interfaces: Record<string, Record<string, unknown>>) => {
       const match = findBluezDevice({ [path]: interfaces }, { adapterPath, namePrefix, deviceName, deviceAddress, serviceUuid });
@@ -987,7 +1006,7 @@ function sortDiscoveredDevices(left: TrumaDiscoveredDevice, right: TrumaDiscover
 }
 
 async function getBluezBoolean(properties: BluezProperties, interfaceName: string, propertyName: string): Promise<boolean | null> {
-  const value = await properties.Get(interfaceName, propertyName).catch(() => null);
+  const value = await withTimeout(properties.Get(interfaceName, propertyName), 5000, `BlueZ property ${propertyName}`);
   const unboxed = unboxBluezValue(value);
   return typeof unboxed === 'boolean' ? unboxed : null;
 }
@@ -1028,7 +1047,7 @@ async function writeBluezValueWithRetry(characteristic: BluezCharacteristic, val
   let lastError: unknown;
   for (let attempt = 0; attempt < 12; attempt += 1) {
     try {
-      await characteristic.WriteValue(value, options);
+      await withTimeout(characteristic.WriteValue(value, options), 10000, 'BlueZ GATT write');
       return;
     } catch (error) {
       lastError = error;

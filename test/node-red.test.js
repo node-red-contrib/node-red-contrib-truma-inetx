@@ -144,3 +144,13 @@ test('forget endpoint requires write permission and explicit adapter plus MAC', 
   assert.equal(options.deviceAddress, 'AA:BB:CC:DD:EE:FF');
   assert.equal(res.body.status, 'removed');
 });
+
+test('missing topology after startup failure does not trigger redundant discovery before get', async () => {
+  let attempts = 0;
+  const { types } = register('truma-inetx-device.js', { discover: async () => { attempts++; throw new Error('Device unavailable'); } });
+  const device = new types['truma-inetx-device']({});
+  const missing = await device.ensureTopics(['AirHeating']);
+  assert.equal(missing[0], 'AirHeating');
+  assert.equal(attempts, 1);
+  assert.equal(device.tree, null);
+});
