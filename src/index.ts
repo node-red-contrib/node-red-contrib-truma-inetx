@@ -1,4 +1,4 @@
-import { findBluezDevice, findBluezAdapterPath, type BluezDeviceFilter } from './ble/selection.js';
+import { findBluezDevice, findBluezAdapterPath } from './ble/selection.js';
 import { validateParameterValue } from './validation.js';
 import { removeBluezDevice, validateUnpairOptions, type UnpairOptions } from './ble/unpair.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
