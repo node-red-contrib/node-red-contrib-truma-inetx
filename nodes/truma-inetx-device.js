@@ -181,6 +181,19 @@ module.exports = function registerTrumaDeviceNode(RED) {
     }
   });
 
+  RED.httpAdmin.post('/truma-inetx/unpair', writePermission, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const truma = await loadLibrary();
+      const options = { adapter: body.adapter, deviceAddress: body.deviceAddress };
+      try { truma.validateUnpairOptions(options); }
+      catch (error) { res.status(400).json({ error: error.message }); return; }
+      res.json(await withBluetooth(() => truma.unpair(options)));
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   RED.httpAdmin.get('/truma-inetx/device/:id/topics', readPermission, async (req, res) => {
     const node = RED.nodes.getNode(req.params.id);
     if (!node || typeof node.topicNames !== 'function') {

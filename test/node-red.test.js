@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { validatePairingCode } from '../dist/index.js';
+import { validatePairingCode, validateUnpairOptions } from '../dist/index.js';
 
 function register(filename, library = {}, devices = {}) {
   const types = {};
@@ -81,12 +81,13 @@ test('editor searches and pairing share the queue with multiple device nodes; er
     return result;
   }
   const { types, routes } = register('truma-inetx-device.js', {
-    discover: () => work(tree), discoverTrumaDevices: () => work([]), pair: () => work({ bluez: { paired: true } }), validatePairingCode
+    discover: () => work(tree), discoverTrumaDevices: () => work([]), pair: () => work({ bluez: { paired: true } }), unpair: () => work({ status: 'removed' }), validatePairingCode, validateUnpairOptions
   });
   const first = new types['truma-inetx-device']({});
   const second = new types['truma-inetx-device']({});
   await Promise.all([
     first.ready, second.ready,
+    routes['post /truma-inetx/unpair'].handler({ body: { adapter: 'hci0', deviceAddress: 'AA:BB:CC:DD:EE:FF' } }, response()),
     routes['get /truma-inetx/devices'].handler({ query: {} }, response()),
     routes['post /truma-inetx/pair'].handler({ body: { deviceAddress: 'AA:BB:CC:DD:EE:FF' } }, response())
   ]);
@@ -122,4 +123,24 @@ test('editor script parses and pairing code is not a persisted configuration fie
   assert.equal(definition.defaults.timeZone.validate('Europe/Berlin'), true);
   assert.equal(definition.defaults.timeZone.validate('Invalid/Zone'), false);
   assert.equal('pairingCode' in definition.defaults, false);
+});
+
+test('forget endpoint requires write permission and explicit adapter plus MAC', async () => {
+  let options;
+  const { routes } = register('truma-inetx-device.js', {
+    validateUnpairOptions, unpair: async (input) => { options = input; return { status: 'removed' }; }
+  });
+  const route = routes['post /truma-inetx/unpair'];
+  assert.equal(route.permission, 'flows.write');
+  for (const body of [{}, { deviceAddress: 'AA:BB:CC:DD:EE:FF' }, { adapter: 'hci0', deviceAddress: 'Truma' }]) {
+    const res = response();
+    await route.handler({ body }, res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(options, undefined);
+  }
+  const res = response();
+  await route.handler({ body: { adapter: 'hci1', deviceAddress: 'AA:BB:CC:DD:EE:FF' } }, res);
+  assert.equal(options.adapter, 'hci1');
+  assert.equal(options.deviceAddress, 'AA:BB:CC:DD:EE:FF');
+  assert.equal(res.body.status, 'removed');
 });

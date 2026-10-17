@@ -70,6 +70,7 @@ export interface TrumaDiscoveredDevice {
   id: string;
   name: string | null;
   address: string | null;
+  addressType?: string | null;
   rssi: number | null;
   paired: boolean | null;
   trusted: boolean | null;
@@ -963,6 +964,7 @@ function bluezDiscoveredDevice(path: string, device: Record<string, unknown> | u
     id: path,
     name: nullableString(unboxBluezValue(device.Name)) || nullableString(unboxBluezValue(device.Alias)),
     address: nullableString(unboxBluezValue(device.Address)),
+    addressType: nullableString(unboxBluezValue(device.AddressType)),
     rssi: nullableNumber(unboxBluezValue(device.RSSI)),
     paired: nullableBoolean(unboxBluezValue(device.Paired)),
     trusted: nullableBoolean(unboxBluezValue(device.Trusted))

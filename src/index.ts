@@ -1,5 +1,6 @@
 import { findBluezAdapterPath, matchesBluezDevice, type BluezDeviceFilter } from './ble/selection.js';
 import { validateParameterValue } from './validation.js';
+import { removeBluezDevice, validateUnpairOptions, type UnpairOptions } from './ble/unpair.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -19,6 +20,8 @@ export { validateParameterValue } from './validation.js';
 export { utcOffsetMinutes, buildSystemTimeFrame } from './system-time.js';
 export { WriteUnconfirmedError } from './protocol.js';
 export { discoverTrumaDevices, discoverBluetoothAdapters } from './ble.js';
+export { validateUnpairOptions } from './ble/unpair.js';
+export type { UnpairOptions } from './ble/unpair.js';
 export type { BluetoothAdapter } from './ble/selection.js';
 export type { BluetoothBackendName, ConnectOptions, TrumaDiscoveredDevice, TrumaSession } from './ble.js';
 export type { TrumaCharacteristic, TrumaCharacteristics, TrumaProtocolOptions } from './protocol.js';
@@ -92,6 +95,13 @@ export type LinuxAgentCapability = 'DisplayOnly' | 'DisplayYesNo' | 'KeyboardOnl
 export type LinuxPairingMethod = 'noble-trigger' | 'bluez';
 
 const requireOptional = createRequire(import.meta.url);
+
+/** Forget the selected device's Linux bond on one explicit adapter. */
+export async function unpair(options: UnpairOptions) {
+  validateUnpairOptions(options);
+  if (process.platform !== 'linux') throw new Error('Forgetting Bluetooth pairing requires BlueZ on Linux.');
+  return removeBluezDevice(loadDbusNext().systemBus(), options);
+}
 
 export async function get({
   protocol,

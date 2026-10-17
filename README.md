@@ -97,6 +97,18 @@ that attempt only and is never stored in the flow. Pairing uses the current
 editor selection, so it can run before deployment. Deploy afterwards and use
 **Reread** to refresh the device tree.
 
+Deleting a Node-RED device configuration does not delete the Linux Bluetooth
+bond. To reset it, select an explicit adapter and device and click **Forget
+pairing**. This immediately removes that host bond and cached device, affecting
+all flows using the same device on that adapter. It does not remove your phone's
+pairing. You may also need to remove this host on the Truma panel. Search again,
+select the panel's current entry, and pair again.
+
+The search list can include cached devices. **Paired on host** describes Linux's
+stored bond, which can remain after deleting pairing on the panel. A stale public
+identity address and a new unpaired random address may therefore appear with the
+same name; the name alone does not prove they are the same physical device.
+
 Editor pairing requires BlueZ on Linux and permission for the Node-RED process
 to use the system Bluetooth D-Bus API. It does not change controller-wide
 settings. Panels requiring the older controller preparation can still use the

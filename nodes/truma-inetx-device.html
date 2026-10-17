@@ -34,9 +34,9 @@
       function deviceLabel(device) {
         var name = device.name || '<unnamed>';
         var address = device.address || device.id || 'unknown address';
-        var paired = device.paired === true ? 'paired' : device.paired === false ? 'not paired' : 'pairing unknown';
+        var paired = device.paired === true ? 'paired on host' : device.paired === false ? 'not paired' : 'pairing unknown';
         var rssi = typeof device.rssi === 'number' ? ', rssi ' + device.rssi : '';
-        return name + ' (' + address + ', ' + device.backend + ', ' + paired + rssi + ')';
+        return name + ' (' + address + (device.addressType ? ', ' + device.addressType : '') + ', ' + device.backend + ', ' + paired + rssi + ')';
       }
 
       function appendDeviceOption(device) {
@@ -85,7 +85,7 @@
       });
 
       searchButton.on('click', function () {
-        searchButton.prop('disabled', true);
+        setBluetoothBusy(true);
         searchStatus.text('searching...');
         $.getJSON('truma-inetx/devices', {
           bluetooth: $('#node-config-input-bluetooth').val(),
@@ -98,7 +98,7 @@
             deviceSelect.append($('<option></option>').attr('value', '').text('First discovered Truma iNet X'));
             devices.forEach(appendDeviceOption);
             setSelected(previousName || previousAddress ? 'device' : 'first', previousName, previousAddress);
-            if (deviceSelect.val() === null) setSelected('first', '', '');
+            if (deviceSelect.val() === null) ensureCurrentOption();
             searchStatus.text(devices.length + ' found');
           })
           .fail(function (xhr) {
@@ -106,7 +106,7 @@
             searchStatus.text(response.error || 'search failed');
           })
           .always(function () {
-            searchButton.prop('disabled', false);
+            setBluetoothBusy(false);
           });
       });
 
@@ -132,6 +132,8 @@
 
       var adapterInput = $('#node-config-input-adapter');
       var pairButton = $('#node-config-input-pair');
+      var forgetButton = $('#node-config-input-forget');
+      var bluetoothBusy = false;
       var pairStatus = $('#node-config-input-pair-status');
       var pairingCode = $('#node-config-input-pairingCode');
       $.getJSON('truma-inetx/adapters').done(function (adapters) {
@@ -139,10 +141,17 @@
           $('#truma-adapters').append($('<option></option>').val(adapter.address || adapter.name).text(adapter.name + (adapter.powered ? '' : ' (powered off)')));
         });
       }).fail(function () { /* Manual MAC or hci input remains available. */ });
+      function setBluetoothBusy(busy) {
+        bluetoothBusy = busy;
+        searchButton.prop('disabled', busy);
+        pairButton.add(forgetButton).prop('disabled', busy || $('#node-config-input-bluetooth').val() === 'noble');
+        deviceSelect.add(adapterInput).add($('#node-config-input-bluetooth')).prop('disabled', busy);
+        if (!busy) adapterInput.prop('disabled', $('#node-config-input-bluetooth').val() === 'noble');
+      }
       function backendChanged() {
         var noble = $('#node-config-input-bluetooth').val() === 'noble';
         adapterInput.prop('disabled', noble);
-        pairButton.prop('disabled', noble);
+        pairButton.add(forgetButton).prop('disabled', noble || bluetoothBusy);
         pairStatus.text(noble ? 'Editor pairing requires BlueZ on Linux.' : '');
       }
       $('#node-config-input-bluetooth').on('change', backendChanged);
@@ -151,21 +160,41 @@
         if (!deviceAddress.val()) { pairStatus.text('Search and select a device first.'); return; }
         var code = pairingCode.val();
         if (code && !/^\d{6}$/.test(code)) { pairStatus.text('Enter exactly six digits, or leave blank if no code is shown.'); return; }
-        pairButton.prop('disabled', true);
-        searchButton.prop('disabled', true);
+        setBluetoothBusy(true);
         pairStatus.text('Pairing… confirm on the panel if requested.');
         $.ajax({
           url: 'truma-inetx/pair', type: 'POST', contentType: 'application/json',
           data: JSON.stringify({ adapter: adapterInput.val(), deviceAddress: deviceAddress.val(), passkey: code })
         }).done(function (result) {
+          if (result.bluez && result.bluez.paired && result.bluez.address) {
+            // BlueZ may resolve a random address to the public identity during pairing.
+            setSelected('device', result.bluez.name || deviceName.val(), result.bluez.address);
+            ensureCurrentOption();
+          }
           pairStatus.text(result.bluez && result.bluez.paired ? 'Paired. Deploy, then reread the device tree.' : 'Pairing triggered; check the panel.');
         }).fail(function (xhr) {
           pairStatus.text((xhr.responseJSON || {}).error || 'Pairing failed. Check pairing mode and Bluetooth permissions.');
         }).always(function () {
           pairingCode.val('');
-          pairButton.prop('disabled', $('#node-config-input-bluetooth').val() === 'noble');
-          searchButton.prop('disabled', false);
+          setBluetoothBusy(false);
         });
+      });
+      forgetButton.on('click', function () {
+        var address = deviceAddress.val();
+        var adapter = adapterInput.val().trim();
+        if (!adapter || !address) { pairStatus.text('Select a specific adapter and device first.'); return; }
+        if (!window.confirm('Forget Bluetooth pairing for ' + address + ' on adapter ' + adapter + '? This removes the host bond for all flows using this device. You may also need to remove this host on the Truma panel.')) return;
+        setBluetoothBusy(true);
+        pairStatus.text('Forgetting pairing…');
+        $.ajax({
+          url: 'truma-inetx/unpair', type: 'POST', contentType: 'application/json',
+          data: JSON.stringify({ adapter: adapter, deviceAddress: address })
+        }).done(function (result) {
+          deviceSelect.find('option:selected').text((deviceName.val() || '<unnamed>') + ' (' + address + ', no host bond)');
+          pairStatus.text((result.status === 'not-found' ? 'No stored device found.' : 'Host pairing forgotten.') + ' Search again, select the panel and pair.');
+        }).fail(function (xhr) {
+          pairStatus.text((xhr.responseJSON || {}).error || 'Could not forget pairing.');
+        }).always(function () { setBluetoothBusy(false); });
       });
       ensureCurrentOption();
     }
@@ -213,6 +242,7 @@
     <input type="password" id="node-config-input-pairingCode" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="Six digits if required" style="width:45%;">
     <button type="button" id="node-config-input-pair" class="red-ui-button">Pair</button>
   </div>
+  <div class="form-row"><label></label><button type="button" id="node-config-input-forget" class="red-ui-button">Forget pairing</button></div>
   <div class="form-row"><label></label><span id="node-config-input-pair-status"></span></div>
   <div class="form-row">
     <label><i class="fa fa-sitemap"></i> Device tree</label>
@@ -222,5 +252,6 @@
 </script>
 
 <script type="text/html" data-help-name="truma-inetx-device">
+  <p>Deleting a configuration does not remove its Bluetooth bond. Select an explicit adapter and device, then use Forget pairing to remove the host bond. This affects all flows using that device on this adapter. Remove the host on the panel too if needed. Public and random addresses with the same name can appear after a pairing reset; paired on host describes the stored Linux state. Search can include cached devices.</p>
   <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Use Search to select a visible device. On Linux, put the panel in pairing mode, enter its six-digit code if shown, and click Pair. The code is used once and never saved in the flow. Pair uses the current editor selection; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot and defaults to the host timezone. Connections close after each operation.</p>
 </script>
