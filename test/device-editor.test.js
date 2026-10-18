@@ -10,8 +10,9 @@ function editor(confirm = true) {
   const confirmations = [];
   class Element {
     constructor(id = '') { this.id = id; this.value = ''; this.options = []; this.handlers = {}; this.attrs = {}; }
+    allOptions() { return this.options.flatMap((o) => o.options.length ? o.allOptions() : [o]); }
     val(value) {
-      if (value === undefined) return this.id === '#node-config-input-deviceSelect' && !this.options.some((o) => o.attrs.value === this.value) ? null : this.value;
+      if (value === undefined) return this.id === '#node-config-input-deviceSelect' && !this.allOptions().some((o) => o.attrs.value === this.value) ? null : this.value;
       this.value = value; return this;
     }
     text(value) { this.label = value; return this; }
@@ -76,8 +77,47 @@ test('editor forget requires confirmation and sends the exact adapter and addres
 test('editor saves the resolved identity returned by pairing a random address', () => {
   const { field, requests } = editor();
   field('deviceAddress').val('5A:0D:F1:74:99:FE');
+  field('search').handlers.click();
+  requests.at(-1).resolve([{ address: '5A:0D:F1:74:99:FE', name: 'Truma', paired: false, backend: 'bluez' }]);
   field('pair').handlers.click();
   requests.at(-1).resolve({ bluez: { paired: true, address: 'FC:A8:9B:57:E6:C1', name: 'Truma' } });
   assert.equal(field('deviceAddress').val(), 'FC:A8:9B:57:E6:C1');
   assert.equal(JSON.parse(field('deviceSelect').val()).address, 'FC:A8:9B:57:E6:C1');
+  assert.equal(field('deviceSelect').allOptions().length, 2); // Automatic + resolved identity; no old random record.
+  assert.match(field('deviceSelect').allOptions()[1].label, /paired on host/);
+});
+
+for (const status of ['removed', 'not-found']) {
+  test(`editor removes forgotten Bluetooth records (${status}) and separates the saved target`, () => {
+    const { field, requests } = editor();
+    field('search').handlers.click();
+    requests.at(-1).resolve([
+      { name: 'Truma', address: 'FC:A8:9B:57:E6:C1', backend: 'bluez', paired: true },
+      { name: 'Truma', address: '59:E4:0E:97:5E:85', backend: 'bluez', paired: false }
+    ]);
+    field('forget').handlers.click();
+    requests.at(-1).resolve({ status });
+    const groups = field('deviceSelect').options;
+    assert.match(groups[1].attrs.label, /Saved target only/);
+    assert.match(groups[1].options[0].label, /Saved address: FC:A8:9B:57:E6:C1 \(pairing removed\)/);
+    assert.equal(groups[2].options.length, 1);
+    assert.match(groups[2].options[0].label, /59:E4:0E:97:5E:85/);
+    assert.match(field('search-status').label, /^1 Bluetooth record;/);
+    // Forget must not silently switch the flow to the other panel or automatic selection.
+    assert.equal(field('deviceAddress').val(), 'FC:A8:9B:57:E6:C1');
+    assert.equal(field('targetMode').val(), 'device');
+    field('deviceSelect').val(groups[2].options[0].attrs.value);
+    field('deviceSelect').handlers.change();
+    assert.equal(field('deviceSelect').allOptions().length, 2);
+    assert.equal(field('deviceAddress').val(), '59:E4:0E:97:5E:85');
+  });
+}
+
+test('editor matches saved targets by address even when the discovered name changes', () => {
+  const { field, requests } = editor();
+  field('search').handlers.click();
+  requests.at(-1).resolve([{ name: 'Truma iNetX-57E6C1', address: 'fc:a8:9b:57:e6:c1', backend: 'bluez' }]);
+  assert.equal(field('deviceSelect').allOptions().length, 2);
+  assert.equal(field('deviceName').val(), 'Truma iNetX-57E6C1');
+  assert.notEqual(field('deviceSelect').val(), null);
 });
