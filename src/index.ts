@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { connectToTruma, disconnectQuietly, isBluezAvailable, readSoftwareRevision, type ConnectOptions } from './ble.js';
-import { buildGroupReadSequence, buildTopicReadSequence, READ_SEQUENCE, TRUMA } from './constants.js';
+import { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, READ_SEQUENCE, TRUMA } from './constants.js';
 import { TrumaProtocol, type ReadRequest, type TrumaProtocolOptions } from './protocol.js';
 import { parseSettingsJson, type SettingsJson } from './settings.js';
 import { decodeFirstCbor, type TrumaValue } from './truma-frame.js';
@@ -159,8 +159,9 @@ export async function discover({
   redact = true,
   logger = () => {},
   readRetries = 1,
+  topologyOnly = false,
   ...connectOptions
-}: Omit<GetTrumaSettingsOptions, 'topics' | 'groups' | 'sequence'> = {}): Promise<SettingsJson> {
+}: Omit<GetTrumaSettingsOptions, 'topics' | 'groups' | 'sequence'> & { topologyOnly?: boolean } = {}): Promise<SettingsJson> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= readRetries; attempt += 1) {
@@ -176,7 +177,7 @@ export async function discover({
         ...protocol,
         logger: protocol?.logger ?? logger
       });
-      const responses = await trumaProtocol.readAll({ sequence: READ_SEQUENCE });
+      const responses = await trumaProtocol.readAll({ sequence: topologyOnly ? DISCOVERY_SEQUENCE : READ_SEQUENCE });
       return parseAndLogSettings(responses, { logger, redact });
     } catch (error) {
       lastError = error;

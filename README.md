@@ -95,7 +95,8 @@ and select your panel. Put the panel in Bluetooth pairing mode, enter the
 six-digit code if one is shown, and click **Pair**. The pairing code is used for
 that attempt only and is never stored in the flow. Pairing uses the current
 editor selection, so it can run before deployment. Deploy afterwards and use
-**Reread** to refresh the device tree.
+**Reread** to refresh topic names and the device list. Use a Get node to read
+parameter values; it learns missing topic groups within that same connection.
 
 Deleting a Node-RED device configuration does not delete the Linux Bluetooth
 bond. To reset it, select an explicit adapter and device and click **Forget
@@ -198,12 +199,12 @@ repeated, including when callers supply the legacy `readRetries` option. In
 Node-RED, unconfirmed writes use a yellow status and go to the Catch node without
 emitting a successful result.
 
-The set node validates values against cached discovery metadata (availability,
+The set node validates values against cached parameter metadata (availability,
 numeric bounds and available enum choices). CLI `--tree` provides the same
 checks, and library callers can pass `metadata`. Without metadata, only basic
 value checks apply; no ranges or permission-bit meanings are guessed. Values
-remain in protocol units, such as tenths of a degree Celsius. Refresh discovery
-when the panel configuration changes.
+remain in protocol units, such as tenths of a degree Celsius. Read the affected
+topic again when the panel configuration changes.
 
 Known working controls and topic mappings are documented in
 [docs/control-examples.md](docs/control-examples.md). In particular, room
@@ -245,12 +246,13 @@ Primary exports:
 
 Installing this package into Node-RED registers three nodes:
 
-- `truma-inetx-device`: config node that discovers and caches the iNet X topic
-  tree on deploy/start.
+- `truma-inetx-device`: config node that discovers topic names and the device
+  list on deploy/start, without querying every device group's parameters.
 - `truma-inetx-get`: gets all settings or multiple selected topics. Incoming
   `msg.payload` may override topics with a string, array, or `{ "topics": [...] }`.
 - `truma-inetx-set`: sets one topic/parameter/value. Incoming `msg.payload` may
-  override with `{ "topic", "parameter", "value", "group" }`.
+  override with `{ "topic", "parameter", "value", "group" }`. If the topic's
+  group is unknown, it first reads that topic to learn its group and metadata.
 
 The operational nodes and editor discovery/pairing actions serialize BLE access
 across all Truma device nodes in this Node-RED process. Each operation disconnects

@@ -134,7 +134,7 @@
         refreshStatus.text('reading...');
         $.ajax({ url: 'truma-inetx/device/' + encodeURIComponent(nodeId) + '/tree', type: 'POST' })
           .done(function (result) {
-            refreshStatus.text((result.topics || []).length + ' topics');
+            refreshStatus.text((result.topics || []).length + ' topic names; use a Get node for values.');
           })
           .fail(function (xhr) {
             var response = xhr.responseJSON || {};
@@ -282,5 +282,5 @@
 
 <script type="text/html" data-help-name="truma-inetx-device">
   <p>Deleting a configuration does not remove its Bluetooth bond. Select an explicit adapter and device, then use Forget pairing to remove the host bond and all cached BlueZ records matching that address on that adapter. This affects all flows using that device on this adapter. Remove the host on the panel too if needed. Forget pairing also clears the editor selection; click Update and Deploy to persist that change. No device selected prevents automatic connections. A nearby panel can be discovered again, including under a different random address; forgetting is not a blocklist. Other addresses are not deleted merely because they have the same name. Search can include cached devices; paired on host describes the stored Linux state.</p>
-  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Use Search to select a visible device. On Linux, put the panel in pairing mode, enter its six-digit code if shown, and click Pair. The code is used once and never saved in the flow. Pair uses the current editor selection; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot and defaults to the host timezone. Connections close after each operation.</p>
+  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Reread refreshes topic names and the device list; Get reads parameter values and learns their groups. Use Search to select a visible device. On Linux, put the panel in pairing mode, enter its six-digit code if shown, and click Pair. The code is used once and never saved in the flow. Pair uses the current editor selection; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot and defaults to the host timezone. Connections close after each operation.</p>
 </script>

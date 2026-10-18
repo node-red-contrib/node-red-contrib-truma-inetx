@@ -54,6 +54,7 @@ module.exports = function registerTrumaDeviceNode(RED) {
       const truma = await node.loadLibrary();
       const discovered = await withBluetooth(() => truma.discover({
         ...node.connectOptions(),
+        topologyOnly: true,
         logger: (message) => node.logDebug(message)
       }));
       node.tree = mergeTrees(node.tree, discovered);
@@ -103,12 +104,8 @@ module.exports = function registerTrumaDeviceNode(RED) {
 
     node.ensureTopics = async (topics) => {
       await node.ready;
-      const missing = node.missingTopics(topics);
-      if (missing.length === 0) return [];
-      // With no topology, get() can discover groups in its own session. Avoid another
-      // full discovery before every read when initial discovery already failed.
-      if (!node.tree) return missing;
-      await node.refreshTree();
+      // get() locates missing topic groups in its own connection. A full refresh
+      // here probes unrelated devices and opens an unnecessary extra connection.
       return node.missingTopics(topics);
     };
 
@@ -122,7 +119,15 @@ module.exports = function registerTrumaDeviceNode(RED) {
     };
 
     node.groupForTopic = async (topic) => {
-      if (!node.tree || !hasReadableTopic(node.tree, topic)) await node.refreshTree();
+      await node.ready;
+      if (!hasReadableTopic(node.tree, topic)) {
+        const result = await node.enqueue((truma) => truma.get({
+          ...node.connectOptions(),
+          topics: [topic],
+          logger: (message) => node.logDebug(message)
+        }));
+        node.mergeTree(result);
+      }
       if (!node.tree) throw new Error('Truma tree is not available yet.');
       const groups = readTopicGroups(node.tree, topic);
       if (groups.length === 0) throw new Error(`Could not infer a group for topic ${topic}.`);

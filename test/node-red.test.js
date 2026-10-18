@@ -58,6 +58,7 @@ test('device config passes adapter/timezone and retains validation metadata afte
   assert.equal(options.adapter, 'hci1');
   assert.equal(options.protocol.timeZone, 'Europe/Berlin');
   assert.equal(options.deviceAddress, 'AA:BB:CC:DD:EE:FF');
+  assert.equal(options.topologyOnly, true);
   device.mergeTree({ topics: { AirHeating: { parameters: { TgtTemp: { value: 220 } } } } });
   assert.equal(device.tree.topics.AirHeating.parameters.TgtTemp.value, 220);
   assert.equal(device.tree.topics.AirHeating.parameters.TgtTemp.max, 300);
@@ -165,4 +166,41 @@ test('missing topology after startup failure does not trigger redundant discover
   assert.equal(missing[0], 'AirHeating');
   assert.equal(attempts, 1);
   assert.equal(device.tree, null);
+});
+
+test('a topic read with an incomplete cached tree goes straight to get without a full rediscovery', async () => {
+  let discoveries = 0;
+  let reads = 0;
+  const library = {
+    discover: async () => { discoveries++; return { topicLists: ['AirHeating'], topics: {} }; },
+    get: async (options) => {
+      reads++;
+      assert.deepEqual(Array.from(options.topics), ['AirHeating']);
+      assert.equal(options.groups, undefined);
+      return tree;
+    }
+  };
+  const config = register('truma-inetx-device.js', library);
+  const device = new config.types['truma-inetx-device']({});
+  await device.ready;
+  const flow = register('truma-inetx-get.js', {}, { device });
+  const node = new flow.types['truma-inetx-get']({ device: 'device', topics: 'AirHeating' });
+  let emitted;
+  await node.handlers.input({ payload: 123 }, (msg) => { emitted = msg; }, (error) => { assert.ifError(error); });
+  assert.equal(discoveries, 1);
+  assert.equal(reads, 1);
+  assert.equal(emitted.payload.topics.AirHeating.parameters.TgtTemp.value, 200);
+});
+
+test('write group lookup learns only the requested topic and retains its validation metadata', async () => {
+  const reads = [];
+  const { types } = register('truma-inetx-device.js', {
+    discover: async () => ({ topicLists: ['AirHeating'], topics: {} }),
+    get: async (options) => { reads.push(Array.from(options.topics)); return tree; }
+  });
+  const device = new types['truma-inetx-device']({});
+  assert.equal(await device.groupForTopic('AirHeating'), 0x0201);
+  assert.equal(await device.groupForTopic('AirHeating'), 0x0201);
+  assert.deepEqual(reads, [['AirHeating']]);
+  assert.equal(device.tree.topics.AirHeating.parameters.TgtTemp.max, 300);
 });

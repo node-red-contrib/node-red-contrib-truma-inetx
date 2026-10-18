@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test from 'node:test';
-import { connectToTruma, disconnectQuietly, get, TRUMA } from '../dist/index.js';
+import { connectToTruma, disconnectQuietly, discover, get, TrumaProtocol, TRUMA } from '../dist/index.js';
 
 const require = createRequire(import.meta.url);
 const dbus = require('dbus-next');
@@ -72,4 +72,19 @@ test('failed topic reads release the connected BlueZ session', async () => {
     await assert.rejects(get(options), /Notification subscription failed/);
     assert.deepEqual(calls, ['connect', 'disconnect', 'close-bus']);
   });
+});
+
+test('topology-only discovery avoids group parameter reads while full library discovery remains available', async () => {
+  const originalReadAll = TrumaProtocol.prototype.readAll;
+  const sequences = [];
+  TrumaProtocol.prototype.readAll = async ({ sequence }) => { sequences.push(sequence); return []; };
+  try {
+    await mockBluez({}, async () => {
+      await discover({ ...options, topologyOnly: true });
+      await discover(options);
+    });
+    assert.equal(sequences[0].some((request) => request.dynamic === 'device-groups'), false);
+    assert.equal(sequences[0].some((request) => request.name === 'read-device-list'), true);
+    assert.equal(sequences[1].some((request) => request.dynamic === 'device-groups'), true);
+  } finally { TrumaProtocol.prototype.readAll = originalReadAll; }
 });
