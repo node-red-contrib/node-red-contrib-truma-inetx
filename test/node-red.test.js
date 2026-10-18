@@ -38,6 +38,18 @@ function response() {
 
 const tree = { topics: { AirHeating: { group: '0x0201', parameters: { TgtTemp: { value: 200, min: 50, max: 300 } } } } };
 
+test('cleared device selection survives deployment without discovering or connecting to another panel', async () => {
+  let calls = 0;
+  const { types } = register('truma-inetx-device.js', { discover: async () => { calls++; return tree; } });
+  const device = new types['truma-inetx-device']({ targetMode: 'none', deviceAddress: '', deviceName: '' });
+  await device.ready;
+  assert.equal(device.lastStatus.text, 'no device selected');
+  assert.throws(() => device.connectOptions(), /No Truma device selected/);
+  await assert.rejects(device.refreshTree(), /No Truma device selected/);
+  await assert.rejects(device.enqueue(() => { calls++; }), /No Truma device selected/);
+  assert.equal(calls, 0);
+});
+
 test('device config passes adapter/timezone and retains validation metadata after value-only updates', async () => {
   let options;
   const { types } = register('truma-inetx-device.js', { discover: async (input) => { options = input; return tree; } });

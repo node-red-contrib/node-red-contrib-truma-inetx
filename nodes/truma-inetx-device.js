@@ -27,13 +27,19 @@ module.exports = function registerTrumaDeviceNode(RED) {
 
     node.loadLibrary = loadLibrary;
 
-    node.connectOptions = () => ({
-      bluetooth: node.bluetooth,
-      ...(node.adapter ? { adapter: node.adapter } : {}),
-      ...(node.timeZone ? { protocol: { timeZone: node.timeZone } } : {}),
-      ...(node.targetMode === 'device' && node.deviceName ? { deviceName: node.deviceName } : {}),
-      ...(node.targetMode === 'device' && node.deviceAddress ? { deviceAddress: node.deviceAddress } : {})
-    });
+    node.requireTarget = () => {
+      if (node.targetMode === 'none') throw new Error('No Truma device selected. Search and select a device in its configuration, then deploy.');
+    };
+    node.connectOptions = () => {
+      node.requireTarget();
+      return {
+        bluetooth: node.bluetooth,
+        ...(node.adapter ? { adapter: node.adapter } : {}),
+        ...(node.timeZone ? { protocol: { timeZone: node.timeZone } } : {}),
+        ...(node.targetMode === 'device' && node.deviceName ? { deviceName: node.deviceName } : {}),
+        ...(node.targetMode === 'device' && node.deviceAddress ? { deviceAddress: node.deviceAddress } : {})
+      };
+    };
 
     node.updateReadyStatus = () => {
       const topics = topicNames(node.tree);
@@ -43,6 +49,7 @@ module.exports = function registerTrumaDeviceNode(RED) {
     };
 
     node.refreshTreeNow = async () => {
+      node.requireTarget();
       node.status({ fill: 'yellow', shape: 'ring', text: 'discovering' });
       const truma = await node.loadLibrary();
       const discovered = await withBluetooth(() => truma.discover({
@@ -54,7 +61,8 @@ module.exports = function registerTrumaDeviceNode(RED) {
       return node.tree;
     };
 
-    node.ready = node.refreshTreeNow().catch((error) => {
+    if (node.targetMode === 'none') node.status({ fill: 'grey', shape: 'ring', text: 'no device selected' });
+    node.ready = node.targetMode === 'none' ? Promise.resolve(null) : node.refreshTreeNow().catch((error) => {
       node.status({ fill: 'red', shape: 'ring', text: 'discover failed' });
       node.error(error);
       return null;
@@ -63,6 +71,7 @@ module.exports = function registerTrumaDeviceNode(RED) {
     node.enqueue = async (operation) => {
       const run = node.queue.then(async () => {
         await node.ready;
+        node.requireTarget();
         const truma = await node.loadLibrary();
         return withBluetooth(() => operation(truma, node.tree));
       });

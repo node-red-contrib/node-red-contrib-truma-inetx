@@ -28,7 +28,6 @@
       var refreshStatus = $('#node-config-input-refresh-tree-status');
       var devices = [];
       var searched = false;
-      var forgottenAddresses = {};
 
       function deviceValue(name, address) {
         return JSON.stringify({ name: name || '', address: address || '' });
@@ -54,7 +53,7 @@
         targetMode.val(mode);
         deviceName.val(name || '');
         deviceAddress.val(address || '');
-        deviceSelect.val(mode === 'device' ? deviceValue(name, address) : '');
+        deviceSelect.val(mode === 'device' ? deviceValue(name, address) : mode === 'none' ? 'none' : '');
       }
 
       function renderDevices() {
@@ -64,10 +63,11 @@
           return currentAddress ? (device.address || '').toLowerCase() === currentAddress.toLowerCase() : currentName && device.name === currentName;
         });
         deviceSelect.empty();
+        deviceSelect.append($('<option></option>').attr('value', 'none').text('No device selected'));
         deviceSelect.append($('<option></option>').attr('value', '').text('First discovered Truma iNet X'));
         if ((currentName || currentAddress) && !current) {
           var savedGroup = $('<optgroup></optgroup>').attr('label', 'Saved target only — not a Bluetooth record');
-          var state = forgottenAddresses[currentAddress.toLowerCase()] ? 'pairing removed' : searched ? 'not in search results' : 'not checked';
+          var state = searched ? 'not in search results' : 'not checked';
           savedGroup.append($('<option></option>').attr('value', deviceValue(currentName, currentAddress))
             .text('Saved address: ' + (currentAddress || currentName) + ' (' + state + ')'));
           deviceSelect.append(savedGroup);
@@ -85,6 +85,11 @@
 
       deviceSelect.on('change', function () {
         var selected = deviceSelect.val();
+        if (selected === 'none') {
+          setSelected('none', '', '');
+          renderDevices();
+          return;
+        }
         if (!selected) {
           setSelected('first', '', '');
           renderDevices();
@@ -185,7 +190,6 @@
               return address !== oldAddress && address !== resolvedAddress;
             });
             devices.push({ name: result.bluez.name || deviceName.val(), address: result.bluez.address, backend: 'bluez', paired: true });
-            delete forgottenAddresses[resolvedAddress];
             setSelected('device', result.bluez.name || deviceName.val(), result.bluez.address);
             renderDevices();
           }
@@ -201,7 +205,7 @@
         var address = deviceAddress.val();
         var adapter = adapterInput.val().trim();
         if (!adapter || !address) { pairStatus.text('Select a specific adapter and device first.'); return; }
-        if (!window.confirm('Forget Bluetooth pairing for ' + address + ' on adapter ' + adapter + '? This removes the host bond for all flows using this device. You may also need to remove this host on the Truma panel.')) return;
+        if (!window.confirm('Forget Bluetooth pairing and cached records for ' + address + ' on adapter ' + adapter + '? This removes the host bond for all flows using this device and clears this editor selection. Update and Deploy to save the cleared selection. You may also need to remove this host on the Truma panel.')) return;
         setBluetoothBusy(true);
         pairStatus.text('Forgetting pairing…');
         $.ajax({
@@ -209,9 +213,9 @@
           data: JSON.stringify({ adapter: adapter, deviceAddress: address })
         }).done(function (result) {
           devices = devices.filter(function (device) { return (device.address || '').toLowerCase() !== address.toLowerCase(); });
-          forgottenAddresses[address.toLowerCase()] = true;
+          setSelected('none', '', '');
           renderDevices();
-          pairStatus.text((result.status === 'not-found' ? 'No stored device found on this adapter.' : 'Host pairing forgotten.') + ' The flow still saves this target address. Search and select the panel to pair again; an unpaired panel may reappear with a different address.');
+          pairStatus.text((result.status === 'not-found' ? 'No stored Bluetooth record found on this adapter.' : 'Host pairing and cached records removed.') + ' Selection cleared. Update and Deploy to save, or Search and select the panel to pair again. A nearby panel can appear again in Search.');
         }).fail(function (xhr) {
           pairStatus.text((xhr.responseJSON || {}).error || 'Could not forget pairing.');
         }).always(function () { setBluetoothBusy(false); });
@@ -250,6 +254,7 @@
   <div class="form-row">
     <label for="node-config-input-deviceSelect"><i class="fa fa-search"></i> Device</label>
     <select id="node-config-input-deviceSelect" style="width:60%;">
+      <option value="none">No device selected</option>
       <option value="">First discovered Truma iNet X</option>
     </select>
     <button type="button" id="node-config-input-search" class="red-ui-button" style="margin-left:4px;">Search</button>
@@ -276,6 +281,6 @@
 </script>
 
 <script type="text/html" data-help-name="truma-inetx-device">
-  <p>Deleting a configuration does not remove its Bluetooth bond. Select an explicit adapter and device, then use Forget pairing to remove the host bond. This affects all flows using that device on this adapter. Remove the host on the panel too if needed. Forget pairing removes the Bluetooth record from the list, but retains the flow's target address separately until you select another target. A saved address is not evidence of a stored bond. Search can include cached devices, and an unpaired panel can reappear with a different random address. Public and random addresses with the same name can appear after a pairing reset; paired on host describes the stored Linux state.</p>
+  <p>Deleting a configuration does not remove its Bluetooth bond. Select an explicit adapter and device, then use Forget pairing to remove the host bond and all cached BlueZ records matching that address on that adapter. This affects all flows using that device on this adapter. Remove the host on the panel too if needed. Forget pairing also clears the editor selection; click Update and Deploy to persist that change. No device selected prevents automatic connections. A nearby panel can be discovered again, including under a different random address; forgetting is not a blocklist. Other addresses are not deleted merely because they have the same name. Search can include cached devices; paired on host describes the stored Linux state.</p>
   <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Use Search to select a visible device. On Linux, put the panel in pairing mode, enter its six-digit code if shown, and click Pair. The code is used once and never saved in the flow. Pair uses the current editor selection; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot and defaults to the host timezone. Connections close after each operation.</p>
 </script>
