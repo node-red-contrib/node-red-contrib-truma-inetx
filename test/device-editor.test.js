@@ -57,7 +57,7 @@ function editor(confirm = true) {
 test('editor forget requires confirmation and sends the exact adapter and address', () => {
   const canceled = editor(false);
   canceled.field('forget').handlers.click();
-  assert.equal(canceled.requests.length, 1); // Adapter list only; no mutation.
+  assert.deepEqual(canceled.requests.map((req) => req.options.url).sort(), ['truma-inetx/adapters', 'truma-inetx/timezones']); // Read-only lists; no mutation.
   const { field, requests, confirmations } = editor();
   field('forget').handlers.click();
   assert.match(confirmations[0], /FC:A8:9B:57:E6:C1.*hci1/);

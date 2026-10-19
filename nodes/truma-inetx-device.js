@@ -148,6 +148,12 @@ module.exports = function registerTrumaDeviceNode(RED) {
   const readPermission = RED.auth?.needsPermission ? RED.auth.needsPermission('flows.read') : (_req, _res, next) => next();
   const writePermission = RED.auth?.needsPermission ? RED.auth.needsPermission('flows.write') : (_req, _res, next) => next();
 
+  RED.httpAdmin.get('/truma-inetx/timezones', readPermission, (_req, res) => {
+    const hostTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    const timeZones = [...new Set(['UTC', hostTimeZone, ...Intl.supportedValuesOf('timeZone')])].filter(Boolean).sort();
+    res.json({ hostTimeZone, timeZones });
+  });
+
   RED.httpAdmin.get('/truma-inetx/devices', readPermission, async (req, res) => {
     try {
       const truma = await loadLibrary();

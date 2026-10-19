@@ -1,4 +1,34 @@
 <script type="text/javascript">
+  function prepareTrumaTimeZone() {
+    var input = $('#node-config-input-timeZone');
+    var list = $('#truma-timezones');
+    var status = $('#node-config-input-timeZone-status');
+    var browserButton = $('#node-config-input-browser-timeZone');
+    var browserZone = '';
+    try { browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (_) { /* Manual input remains available. */ }
+    browserButton.prop('disabled', !browserZone).attr('title', browserZone || 'Browser timezone unavailable');
+    browserButton.on('click', function () { input.val(browserZone).trigger('change'); });
+    $('#node-config-input-auto-timeZone').on('click', function () { input.val('').trigger('change'); });
+
+    function populate(zones) {
+      list.empty();
+      Array.from(new Set(zones.concat(['UTC', browserZone, input.val().trim()]))).filter(Boolean).sort().forEach(function (zone) {
+        list.append($('<option></option>').val(zone));
+      });
+    }
+    status.text('Detecting Node-RED host timezone…');
+    $.getJSON('truma-inetx/timezones').done(function (result) {
+      populate(result.timeZones);
+      input.attr('placeholder', 'Automatic — ' + (result.hostTimeZone || 'Node-RED host timezone'));
+      status.text('Automatic: Node-RED host (' + (result.hostTimeZone || 'timezone name unavailable') + '). Browser: ' + (browserZone || 'unavailable') + '.');
+    }).fail(function () {
+      var zones = [];
+      try { if (Intl.supportedValuesOf) zones = Intl.supportedValuesOf('timeZone'); } catch (_) { /* Manual input remains available. */ }
+      populate(zones);
+      status.text('Host timezone unavailable. Suggestions use this browser; blank still uses the Node-RED host.');
+    });
+  }
+
   RED.nodes.registerType('truma-inetx-device', {
     category: 'config',
     defaults: {
@@ -15,8 +45,10 @@
     },
     oneditsave: function () {
       if ($('#node-config-input-bluetooth').val() === 'noble') $('#node-config-input-adapter').val('');
+      $('#node-config-input-timeZone').val($('#node-config-input-timeZone').val().trim());
     },
     oneditprepare: function () {
+      prepareTrumaTimeZone();
       var nodeId = this.id;
       var deviceSelect = $('#node-config-input-deviceSelect');
       var targetMode = $('#node-config-input-targetMode');
@@ -249,7 +281,17 @@
   </div>
   <div class="form-row">
     <label for="node-config-input-timeZone">Timezone</label>
-    <input type="text" id="node-config-input-timeZone" placeholder="Host timezone, e.g. Europe/Berlin">
+    <input type="text" id="node-config-input-timeZone" list="truma-timezones" placeholder="Automatic — Node-RED host timezone" aria-describedby="node-config-input-timeZone-status">
+    <datalist id="truma-timezones"></datalist>
+  </div>
+  <div class="form-row">
+    <label></label>
+    <button type="button" id="node-config-input-auto-timeZone" class="red-ui-button">Automatic (host)</button>
+    <button type="button" id="node-config-input-browser-timeZone" class="red-ui-button">Use browser timezone</button>
+  </div>
+  <div class="form-row">
+    <label></label>
+    <span id="node-config-input-timeZone-status"></span>
   </div>
   <div class="form-row">
     <label for="node-config-input-deviceSelect"><i class="fa fa-search"></i> Device</label>
@@ -282,5 +324,5 @@
 
 <script type="text/html" data-help-name="truma-inetx-device">
   <p>Deleting a configuration does not remove its Bluetooth bond. Select an explicit adapter and device, then use Forget pairing to remove the host bond and all cached BlueZ records matching that address on that adapter. This affects all flows using that device on this adapter. Remove the host on the panel too if needed. Forget pairing also clears the editor selection; click Update and Deploy to persist that change. No device selected prevents automatic connections. A nearby panel can be discovered again, including under a different random address; forgetting is not a blocklist. Other addresses are not deleted merely because they have the same name. Search can include cached devices; paired on host describes the stored Linux state.</p>
-  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Reread refreshes topic names and the device list; Get reads parameter values and learns their groups. Use Search to select a visible device. On Linux, put the panel in pairing mode, enter its six-digit code if shown, and click Pair. The code is used once and never saved in the flow. Pair uses the current editor selection; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot and defaults to the host timezone. Connections close after each operation.</p>
+  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Reread refreshes topic names and the device list; Get reads parameter values and learns their groups. Use Search to select a visible device. On Linux, put the panel in pairing mode, enter its six-digit code if shown, and click Pair. The code is used once and never saved in the flow. Pair uses the current editor selection; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot. Blank or Automatic (host) uses the timezone of the computer running Node-RED, shown below the field. Type to filter timezone suggestions. Use browser timezone copies the current browser timezone as an explicit setting; it does not follow later browser timezone changes or change the host OS timezone. Daylight saving time is calculated for each request. Connections close after each operation.</p>
 </script>

@@ -142,6 +142,11 @@ command. When a code is required, a missing or mismatched code fails pairing.
 `SystemTime.Time` remains Unix time in UTC. `SystemTime.Lot` now carries the local
 UTC offset in minutes, including daylight saving time (for example, Germany
 60/120, Auckland 720/780). It defaults to the Node-RED/CLI host timezone.
+In the device editor, leave Timezone blank (or click **Automatic (host)**) to use
+the computer running Node-RED. The editor shows the detected host timezone and
+offers timezone suggestions as you type. **Use browser timezone** copies the
+timezone of the computer or phone opening the editor into the configuration;
+it stays selected until you change it. This does not change the host OS timezone.
 Override it with an IANA timezone in the device configuration, via CLI
 `--time-zone Europe/Berlin`, or library `protocol: { timeZone: 'Europe/Berlin' }`.
 This is useful when the GX host runs in UTC; travelling users should update the

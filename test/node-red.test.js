@@ -38,6 +38,72 @@ function response() {
 
 const tree = { topics: { AirHeating: { group: '0x0201', parameters: { TgtTemp: { value: 200, min: 50, max: 300 } } } } };
 
+test('timezone suggestions use the Node-RED runtime and require read permission', () => {
+  const { routes } = register('truma-inetx-device.js');
+  const route = routes['get /truma-inetx/timezones'];
+  assert.equal(route.permission, 'flows.read');
+  const res = response();
+  route.handler({}, res);
+  assert.equal(res.body.hostTimeZone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+  assert.ok(res.body.timeZones.includes('UTC'));
+  assert.ok(res.body.timeZones.includes('Pacific/Auckland'));
+  for (const timeZone of res.body.timeZones) assert.doesNotThrow(() => new Intl.DateTimeFormat('en', { timeZone }));
+});
+
+test('timezone editor preserves automatic and saved settings, supports explicit browser selection and offline fallback', () => {
+  const html = readFileSync(new URL('../nodes/truma-inetx-device.html', import.meta.url), 'utf8');
+  const script = html.match(/<script type="text\/javascript">([\s\S]*?)<\/script>/)[1];
+  function editor(saved, fails) {
+    const elements = new Map();
+    function element() {
+      return {
+        value: '', textValue: '', attrs: {}, handlers: {}, children: [], changes: 0,
+        val(value) { if (value === undefined) return this.value; this.value = value; return this; },
+        text(value) { this.textValue = value; return this; },
+        prop(key, value) { this.attrs[key] = value; return this; },
+        attr(key, value) { this.attrs[key] = value; return this; },
+        on(event, handler) { this.handlers[event] = handler; return this; },
+        trigger() { this.changes++; return this; },
+        empty() { this.children = []; return this; },
+        append(child) { this.children.push(child); return this; }
+      };
+    }
+    const $ = (selector) => {
+      if (selector.startsWith('<')) return element();
+      if (!elements.has(selector)) elements.set(selector, element());
+      return elements.get(selector);
+    };
+    $.getJSON = () => ({
+      done(fn) { if (!fails) fn({ hostTimeZone: 'UTC', timeZones: ['Europe/Berlin', 'UTC'] }); return this; },
+      fail(fn) { if (fails) fn(); return this; }
+    });
+    const input = $('#node-config-input-timeZone').val(saved);
+    const sandbox = { $, Intl: {
+      DateTimeFormat: () => ({ resolvedOptions: () => ({ timeZone: 'Pacific/Auckland' }) }),
+      supportedValuesOf: () => ['Pacific/Auckland', 'Europe/Berlin']
+    }, RED: { nodes: { registerType() {} } } };
+    runInNewContext(script, sandbox);
+    sandbox.prepareTrumaTimeZone();
+    return { $, input };
+  }
+  for (const fails of [false, true]) {
+    for (const saved of ['', 'Europe/Berlin']) {
+      const { $, input } = editor(saved, fails);
+      assert.equal(input.val(), saved, 'loading must not change the saved timezone');
+      assert.equal(input.changes, 0);
+      const suggestions = $('#truma-timezones').children.map((child) => child.value);
+      assert.ok(suggestions.includes('UTC'));
+      assert.ok(suggestions.includes('Pacific/Auckland'));
+      assert.equal(new Set(suggestions).size, suggestions.length);
+      $('#node-config-input-browser-timeZone').handlers.click();
+      assert.equal(input.val(), 'Pacific/Auckland');
+      $('#node-config-input-auto-timeZone').handlers.click();
+      assert.equal(input.val(), '');
+      assert.equal(input.changes, 2);
+    }
+  }
+});
+
 test('cleared device selection survives deployment without discovering or connecting to another panel', async () => {
   let calls = 0;
   const { types } = register('truma-inetx-device.js', { discover: async () => { calls++; return tree; } });
