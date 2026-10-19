@@ -701,6 +701,11 @@ async function connectToTrumaBluez({
       },
       characteristics
     };
+    deviceProperties.on('PropertiesChanged', (interfaceName, changed) => {
+      if (interfaceName === 'org.bluez.Device1' && unboxBluezValue(changed.Connected) === false) {
+        session.peripheral.state = 'disconnected';
+      }
+    });
     activeBluezSession = session;
     return session;
   } catch (error) {

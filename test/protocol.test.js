@@ -19,6 +19,22 @@ test('learns assigned client address and rewrites later frame headers', () => {
   assert.equal(groupRead.subarray(0, 4).toString('hex'), '04050305');
 });
 
+test('reused protocol keeps its assigned client address without another handshake', async () => {
+  const protocol = new TrumaProtocol(fakeCharacteristics(), { timings: { subscribeSettleMs: 0, pipelineSettleMs: 0 } });
+  const sent = [];
+  protocol.sendFrame = async (_payload, request) => {
+    sent.push(request.name);
+    protocol.learnClientAddress(Buffer.from('ffff00001c000100000000000000000002c1bf6270769f0501ff6461646472190503ff', 'hex'));
+  };
+  protocol.drainPendingResponseAtEnd = async () => {};
+  try {
+    await protocol.readAll({ sequence: [DISCOVERY_SEQUENCE[0]] });
+    await protocol.readAll({ sequence: [DISCOVERY_SEQUENCE[0]] });
+    await protocol.initializeClientAddress();
+    assert.deepEqual(sent, ['protocol-version']);
+  } finally { protocol.close(); }
+});
+
 test('flushes complete response frames without waiting for idle timing', async () => {
   const protocol = new TrumaProtocol(fakeCharacteristics());
   const first = buildTrumaFrame('00000505', '0300', '0400', { topics: [{ tn: 'System', parameters: [{ pn: 'Ready', v: true }] }] });

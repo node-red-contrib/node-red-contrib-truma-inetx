@@ -133,6 +133,9 @@ export class TrumaProtocol {
 
     try {
       for (const request of sequence) {
+        // A retained connection already has an assigned client address. Repeating
+        // the handshake can allocate another address while requests use the old one.
+        if (request.name === 'protocol-version' && this.clientAddress !== null) continue;
         if (request.dynamic === 'device-groups') {
           await this.readDetectedDeviceGroups(request);
           continue;
@@ -156,6 +159,7 @@ export class TrumaProtocol {
 
   async initializeClientAddress() {
     await this.start();
+    if (this.clientAddress !== null) return;
 
     const request = READ_SEQUENCE[0];
     if (!request.hex && !request.build) throw new Error('Protocol-version request does not define a payload.');

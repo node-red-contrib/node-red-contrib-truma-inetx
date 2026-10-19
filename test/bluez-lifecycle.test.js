@@ -13,6 +13,7 @@ async function mockBluez({ paired = true, setupError = false, notifyError = fals
   const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
   const originalBus = dbus.systemBus;
   const calls = [];
+  const propertyListeners = [];
   const objects = {
     '/org/bluez/hci0': { 'org.bluez.Adapter1': { Address: '11:22:33:44:55:66' } },
     [devicePath]: { 'org.bluez.Device1': { Address: 'FC:A8:9B:57:E6:C1', Name: 'Truma iNetX-test' } }
@@ -24,7 +25,7 @@ async function mockBluez({ paired = true, setupError = false, notifyError = fals
   const properties = { Get: async (_, property) => {
     if (setupError && property === 'ServicesResolved') throw new Error('Service discovery failed');
     return { value: property === 'Paired' ? paired : property === 'ServicesResolved' };
-  }, on() {} };
+  }, on(_event, listener) { propertyListeners.push(listener); } };
   dbus.systemBus = () => ({
     async getProxyObject(_, path) {
       return { getInterface(name) {
@@ -39,7 +40,7 @@ async function mockBluez({ paired = true, setupError = false, notifyError = fals
     disconnect() { calls.push('close-bus'); }
   });
   Object.defineProperty(process, 'platform', { value: 'linux' });
-  try { await run(calls); }
+  try { await run(calls, (connected) => propertyListeners.forEach((listener) => listener('org.bluez.Device1', { Connected: { value: connected } }, []))); }
   finally { dbus.systemBus = originalBus; Object.defineProperty(process, 'platform', originalPlatform); }
 }
 const options = { bluetooth: 'bluez', adapter: 'hci0', deviceAddress: 'FC:A8:9B:57:E6:C1' };
@@ -76,6 +77,21 @@ test('failed reads close retained sessions immediately and the next request reco
       assert.deepEqual(calls, ['connect', 'disconnect', 'close-bus']);
       await assert.rejects(get({ ...options, connection }), /Notification subscription failed/);
       assert.deepEqual(calls, ['connect', 'disconnect', 'close-bus', 'connect', 'disconnect', 'close-bus']);
+    } finally { await connection.close(); }
+  });
+});
+
+test('a remote disconnect invalidates a retained session before the next request', async () => {
+  await mockBluez({}, async (calls, changed) => {
+    const connection = new TrumaConnection(60000, (cleanup) => cleanup());
+    try {
+      const first = await connection.acquire(options);
+      await connection.release(true);
+      changed(false);
+      assert.equal(first.session.peripheral.state, 'disconnected');
+      const next = await connection.acquire(options);
+      assert.notEqual(next.session, first.session);
+      assert.deepEqual(calls, ['connect', 'disconnect', 'close-bus', 'connect']);
     } finally { await connection.close(); }
   });
 });
