@@ -1,3 +1,18 @@
+// All config nodes and editor operations share the radio without overlapping sessions.
+let bluetoothQueue = Promise.resolve();
+let retainedConnection;
+function withBluetooth(operation, owner = null, preserveConnection = false) {
+  const run = bluetoothQueue.then(async () => {
+    if (!preserveConnection && retainedConnection && retainedConnection.owner !== owner) {
+      await retainedConnection.connection.close();
+      retainedConnection = null;
+    }
+    return operation();
+  });
+  bluetoothQueue = run.catch(() => {});
+  return run;
+}
+
 module.exports = function registerTrumaDeviceNode(RED) {
   const loadLibrary = async () => import('../dist/index.js');
 
@@ -7,6 +22,10 @@ module.exports = function registerTrumaDeviceNode(RED) {
 
     node.name = config.name;
     node.bluetooth = config.bluetooth || 'auto';
+    node.adapter = (config.adapter || '').trim();
+    node.timeZone = (config.timeZone || '').trim();
+    node.connectionMode = config.connectionMode === 'idle' ? 'idle' : 'request';
+    node.idleTimeoutMinutes = Number(config.idleTimeoutMinutes ?? 1);
     node.targetMode = config.targetMode || (config.deviceName || config.deviceAddress ? 'device' : 'first');
     node.deviceName = config.deviceName || '';
     node.deviceAddress = config.deviceAddress || '';
@@ -17,11 +36,33 @@ module.exports = function registerTrumaDeviceNode(RED) {
 
     node.loadLibrary = loadLibrary;
 
-    node.connectOptions = () => ({
-      bluetooth: node.bluetooth,
-      ...(node.targetMode === 'device' && node.deviceName ? { deviceName: node.deviceName } : {}),
-      ...(node.targetMode === 'device' && node.deviceAddress ? { deviceAddress: node.deviceAddress } : {})
-    });
+    node.useBluetooth = (operation) => withBluetooth(async () => {
+      const truma = await node.loadLibrary();
+      if (node.connectionMode === 'idle') {
+        if (!Number.isFinite(node.idleTimeoutMinutes) || node.idleTimeoutMinutes < 0.1 || node.idleTimeoutMinutes > 1440) {
+          throw new Error('Bluetooth idle timeout must be between 0.1 and 1440 minutes.');
+        }
+        node.connection ??= new truma.TrumaConnection(node.idleTimeoutMinutes * 60000, (cleanup) => withBluetooth(cleanup, node, true));
+        retainedConnection = { owner: node, connection: node.connection };
+      }
+      try { return await operation(truma); }
+      catch (error) { await node.connection?.close(); throw error; }
+    }, node);
+
+    node.requireTarget = () => {
+      if (node.targetMode === 'none') throw new Error('No Truma device selected. Search and select a device in its configuration, then deploy.');
+    };
+    node.connectOptions = () => {
+      node.requireTarget();
+      return {
+        bluetooth: node.bluetooth,
+        ...(node.connection ? { connection: node.connection } : {}),
+        ...(node.adapter ? { adapter: node.adapter } : {}),
+        ...(node.timeZone ? { protocol: { timeZone: node.timeZone } } : {}),
+        ...(node.targetMode === 'device' && node.deviceName ? { deviceName: node.deviceName } : {}),
+        ...(node.targetMode === 'device' && node.deviceAddress ? { deviceAddress: node.deviceAddress } : {})
+      };
+    };
 
     node.updateReadyStatus = () => {
       const topics = topicNames(node.tree);
@@ -31,18 +72,20 @@ module.exports = function registerTrumaDeviceNode(RED) {
     };
 
     node.refreshTreeNow = async () => {
+      node.requireTarget();
       node.status({ fill: 'yellow', shape: 'ring', text: 'discovering' });
-      const truma = await node.loadLibrary();
-      const discovered = await truma.discover({
+      const discovered = await node.useBluetooth((truma) => truma.discover({
         ...node.connectOptions(),
+        topologyOnly: true,
         logger: (message) => node.logDebug(message)
-      });
+      }));
       node.tree = mergeTrees(node.tree, discovered);
       node.updateReadyStatus();
       return node.tree;
     };
 
-    node.ready = node.refreshTreeNow().catch((error) => {
+    if (node.targetMode === 'none') node.status({ fill: 'grey', shape: 'ring', text: 'no device selected' });
+    node.ready = node.targetMode === 'none' ? Promise.resolve(null) : node.refreshTreeNow().catch((error) => {
       node.status({ fill: 'red', shape: 'ring', text: 'discover failed' });
       node.error(error);
       return null;
@@ -51,8 +94,8 @@ module.exports = function registerTrumaDeviceNode(RED) {
     node.enqueue = async (operation) => {
       const run = node.queue.then(async () => {
         await node.ready;
-        const truma = await node.loadLibrary();
-        return operation(truma, node.tree);
+        node.requireTarget();
+        return node.useBluetooth((truma) => operation(truma, node.tree));
       });
       node.queue = run.catch(() => {});
       return run;
@@ -81,9 +124,9 @@ module.exports = function registerTrumaDeviceNode(RED) {
     };
 
     node.ensureTopics = async (topics) => {
-      const missing = node.missingTopics(topics);
-      if (missing.length === 0) return [];
-      await node.refreshTree();
+      await node.ready;
+      // get() locates missing topic groups in its own connection. A full refresh
+      // here probes unrelated devices and opens an unnecessary extra connection.
       return node.missingTopics(topics);
     };
 
@@ -97,7 +140,15 @@ module.exports = function registerTrumaDeviceNode(RED) {
     };
 
     node.groupForTopic = async (topic) => {
-      if (!node.tree || !hasReadableTopic(node.tree, topic)) await node.refreshTree();
+      await node.ready;
+      if (!hasReadableTopic(node.tree, topic)) {
+        const result = await node.enqueue((truma) => truma.get({
+          ...node.connectOptions(),
+          topics: [topic],
+          logger: (message) => node.logDebug(message)
+        }));
+        node.mergeTree(result);
+      }
       if (!node.tree) throw new Error('Truma tree is not available yet.');
       const groups = readTopicGroups(node.tree, topic);
       if (groups.length === 0) throw new Error(`Could not infer a group for topic ${topic}.`);
@@ -106,8 +157,11 @@ module.exports = function registerTrumaDeviceNode(RED) {
     };
 
     node.on('close', (_removed, done) => {
-      node.loadLibrary()
-        .then((truma) => truma.shutdownBluetooth())
+      Promise.all([node.ready, node.queue])
+        .then(() => withBluetooth(async () => {
+          await node.connection?.close();
+          if (retainedConnection?.owner === node) retainedConnection = null;
+        }, node, true))
         .catch(() => {})
         .finally(done);
     });
@@ -118,13 +172,71 @@ module.exports = function registerTrumaDeviceNode(RED) {
   const readPermission = RED.auth?.needsPermission ? RED.auth.needsPermission('flows.read') : (_req, _res, next) => next();
   const writePermission = RED.auth?.needsPermission ? RED.auth.needsPermission('flows.write') : (_req, _res, next) => next();
 
+  RED.httpAdmin.get('/truma-inetx/timezones', readPermission, (_req, res) => {
+    const hostTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    const timeZones = [...new Set(['UTC', hostTimeZone, ...Intl.supportedValuesOf('timeZone')])].filter(Boolean).sort();
+    res.json({ hostTimeZone, timeZones });
+  });
+
   RED.httpAdmin.get('/truma-inetx/devices', readPermission, async (req, res) => {
     try {
       const truma = await loadLibrary();
-      const devices = await truma.discoverTrumaDevices({
-        bluetooth: normalizeBluetooth(req.query.bluetooth)
-      });
+      const devices = await withBluetooth(() => truma.discoverTrumaDevices({
+        bluetooth: normalizeBluetooth(req.query.bluetooth),
+        adapter: typeof req.query.adapter === 'string' ? req.query.adapter.trim() || undefined : undefined
+      }));
       res.json(devices);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  RED.httpAdmin.get('/truma-inetx/adapters', readPermission, async (_req, res) => {
+    try {
+      const truma = await loadLibrary();
+      res.json(await truma.discoverBluetoothAdapters());
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // Use the editor's current selection, including before the config node is deployed.
+  RED.httpAdmin.post('/truma-inetx/pair', writePermission, async (req, res) => {
+    try {
+      const body = req.body || {};
+      if (typeof body.deviceAddress !== 'string' || !/^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(body.deviceAddress)) {
+        res.status(400).json({ error: 'Search and select a specific Truma device before pairing.' });
+        return;
+      }
+      const truma = await loadLibrary();
+      const passkey = body.passkey === '' ? undefined : body.passkey;
+      try { truma.validatePairingCode(passkey); }
+      catch (error) { res.status(400).json({ error: error.message }); return; }
+      const result = await withBluetooth(() => truma.pair({
+        bluetooth: 'bluez',
+        adapter: typeof body.adapter === 'string' ? body.adapter.trim() || undefined : undefined,
+        deviceAddress: body.deviceAddress,
+        passkey,
+        // The editor must not change controller-wide pairing settings.
+        linuxLegacyPairing: false,
+        linuxLegacyPowerCycle: false,
+        linuxDisablePrivacy: false,
+        holdMs: 0
+      }));
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  RED.httpAdmin.post('/truma-inetx/unpair', writePermission, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const truma = await loadLibrary();
+      const options = { adapter: body.adapter, deviceAddress: body.deviceAddress };
+      try { truma.validateUnpairOptions(options); }
+      catch (error) { res.status(400).json({ error: error.message }); return; }
+      res.json(await withBluetooth(() => truma.unpair(options)));
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
     }
@@ -200,10 +312,7 @@ function mergeTrees(current, incoming) {
       ...incomingTopic,
       ...(existingTopic.group && !incomingTopic.group ? { group: existingTopic.group } : {}),
       groups: mergeStringLists(existingTopic.groups, incomingTopic.groups),
-      parameters: {
-        ...(existingTopic.parameters || {}),
-        ...(incomingTopic.parameters || {})
-      }
+      parameters: mergeParameters(existingTopic.parameters, incomingTopic.parameters)
     };
     if (!topics[topicName].groups?.length) delete topics[topicName].groups;
   }
@@ -245,4 +354,12 @@ function mergeStringLists(left, right) {
 
 function normalizeBluetooth(value) {
   return value === 'bluez' || value === 'noble' || value === 'auto' ? value : 'auto';
+}
+
+function mergeParameters(current = {}, incoming = {}) {
+  const merged = { ...current };
+  for (const [name, parameter] of Object.entries(incoming)) {
+    merged[name] = { ...current[name], ...parameter };
+  }
+  return merged;
 }

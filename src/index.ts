@@ -1,25 +1,37 @@
+import { findBluezDevice, findBluezAdapterPath } from './ble/selection.js';
+import { validateParameterValue } from './validation.js';
+import { removeBluezDevice, validateUnpairOptions, type UnpairOptions } from './ble/unpair.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { connectToTruma, disconnectQuietly, isBluezAvailable, readSoftwareRevision, type ConnectOptions } from './ble.js';
-import { buildGroupReadSequence, buildTopicReadSequence, READ_SEQUENCE, TRUMA } from './constants.js';
+import { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, READ_SEQUENCE, TRUMA } from './constants.js';
 import { TrumaProtocol, type ReadRequest, type TrumaProtocolOptions } from './protocol.js';
 import { parseSettingsJson, type SettingsJson } from './settings.js';
 import { decodeFirstCbor, type TrumaValue } from './truma-frame.js';
+import { TrumaConnection } from './connection.js';
+export { TrumaConnection };
 
 export { connectToTruma, disconnectQuietly, isBluezAvailable, isTrumaPeripheral, readSoftwareRevision, shutdownBluetooth } from './ble.js';
 export { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, READ_SEQUENCE, TRUMA } from './constants.js';
 export { TrumaProtocol };
 export { buildParameterWriteFrame, buildTrumaFrame, decodeFirstCbor, decodeTrumaFrame, findCborOffset, parseTrumaHeader } from './truma-frame.js';
 export { collectSettings, parseSettingsJson, settingsToJson } from './settings.js';
-export { discoverTrumaDevices } from './ble.js';
+export { validateParameterValue } from './validation.js';
+export { utcOffsetMinutes, buildSystemTimeFrame } from './system-time.js';
+export { WriteUnconfirmedError } from './protocol.js';
+export { discoverTrumaDevices, discoverBluetoothAdapters } from './ble.js';
+export { validateUnpairOptions } from './ble/unpair.js';
+export type { UnpairOptions } from './ble/unpair.js';
+export type { BluetoothAdapter } from './ble/selection.js';
 export type { BluetoothBackendName, ConnectOptions, TrumaDiscoveredDevice, TrumaSession } from './ble.js';
 export type { TrumaCharacteristic, TrumaCharacteristics, TrumaProtocolOptions } from './protocol.js';
 export type { CollectedSettings, JsonValue, SettingsJson, SettingsTopicJson, TrumaParameter, TrumaTopic } from './settings.js';
 export type { TrumaFrame, TrumaFrameHeader, TrumaValue } from './truma-frame.js';
 
 export interface GetTrumaSettingsOptions extends ConnectOptions {
+  connection?: TrumaConnection;
   protocol?: TrumaProtocolOptions;
   redact?: boolean;
   readRetries?: number;
@@ -29,6 +41,7 @@ export interface GetTrumaSettingsOptions extends ConnectOptions {
 }
 
 export interface SetOptions extends ConnectOptions {
+  connection?: TrumaConnection;
   protocol?: TrumaProtocolOptions;
   redact?: boolean;
   readRetries?: number;
@@ -36,11 +49,14 @@ export interface SetOptions extends ConnectOptions {
   topic: string;
   parameter: string;
   value: TrumaValue;
+  metadata?: unknown;
 }
 
 export interface PairOptions extends ConnectOptions {
   protocol?: TrumaProtocolOptions;
   holdMs?: number;
+  /** Six digits, kept in memory only for the duration of pairing. */
+  passkey?: string;
   linuxPairingMethod?: LinuxPairingMethod;
   linuxAgent?: boolean;
   linuxAgentCapability?: LinuxAgentCapability;
@@ -84,7 +100,15 @@ export type LinuxPairingMethod = 'noble-trigger' | 'bluez';
 
 const requireOptional = createRequire(import.meta.url);
 
+/** Forget the selected device's Linux bond on one explicit adapter. */
+export async function unpair(options: UnpairOptions) {
+  validateUnpairOptions(options);
+  if (process.platform !== 'linux') throw new Error('Forgetting Bluetooth pairing requires BlueZ on Linux.');
+  return removeBluezDevice(loadDbusNext().systemBus(), options);
+}
+
 export async function get({
+  connection,
   protocol,
   redact = true,
   logger = () => {},
@@ -98,14 +122,16 @@ export async function get({
 
   for (let attempt = 1; attempt <= readRetries; attempt += 1) {
     logger(`Starting Truma settings read (attempt ${attempt}/${readRetries}).`);
-    const session = await connectToTruma({ ...connectOptions, logger });
+    const retained = connection ? await connection.acquire({ ...connectOptions, logger }, { ...protocol, logger: protocol?.logger ?? logger }) : null;
+    const session = retained?.session ?? await connectToTruma({ ...connectOptions, logger });
     let trumaProtocol: TrumaProtocol | null = null;
+    let success = false;
 
     try {
       const softwareRevision = await readSoftwareRevision(session.characteristics);
       logger(`Software revision: ${softwareRevision || '<not available>'}.`);
 
-      trumaProtocol = new TrumaProtocol(session.characteristics, {
+      trumaProtocol = retained?.protocol ?? new TrumaProtocol(session.characteristics, {
         ...protocol,
         logger: protocol?.logger ?? logger
       });
@@ -113,7 +139,9 @@ export async function get({
       if (topics?.length) logger(`Reading selected topic(s): ${topics.join(', ')}.`);
       if (groups?.length) logger(`Reading selected device group(s): ${groups.map(formatDeviceGroup).join(', ')}.`);
       const responses = await trumaProtocol.readAll(readSequence ? { sequence: readSequence } : undefined);
-      return parseAndLogSettings(responses, { logger, redact, topics });
+      const result = parseAndLogSettings(responses, { logger, redact, topics });
+      success = true;
+      return result;
     } catch (error) {
       lastError = error;
       logger(`Read attempt ${attempt} failed: ${errorMessage(error)}.`);
@@ -125,8 +153,8 @@ export async function get({
       if (attempt >= readRetries || !isRetryableReadError(error)) throw error;
       logger('Disconnecting and retrying the full BLE/protocol session.');
     } finally {
-      trumaProtocol?.close();
-      await disconnectQuietly(session.peripheral);
+      if (connection) await connection.release(success);
+      else { trumaProtocol?.close(); await disconnectQuietly(session.peripheral); }
     }
 
     await delay(1500);
@@ -136,29 +164,35 @@ export async function get({
 }
 
 export async function discover({
+  connection,
   protocol,
   redact = true,
   logger = () => {},
   readRetries = 1,
+  topologyOnly = false,
   ...connectOptions
-}: Omit<GetTrumaSettingsOptions, 'topics' | 'groups' | 'sequence'> = {}): Promise<SettingsJson> {
+}: Omit<GetTrumaSettingsOptions, 'topics' | 'groups' | 'sequence'> & { topologyOnly?: boolean } = {}): Promise<SettingsJson> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= readRetries; attempt += 1) {
     logger(`Starting Truma topology discovery (attempt ${attempt}/${readRetries}).`);
-    const session = await connectToTruma({ ...connectOptions, logger });
+    const retained = connection ? await connection.acquire({ ...connectOptions, logger }, { ...protocol, logger: protocol?.logger ?? logger }) : null;
+    const session = retained?.session ?? await connectToTruma({ ...connectOptions, logger });
     let trumaProtocol: TrumaProtocol | null = null;
+    let success = false;
 
     try {
       const softwareRevision = await readSoftwareRevision(session.characteristics);
       logger(`Software revision: ${softwareRevision || '<not available>'}.`);
 
-      trumaProtocol = new TrumaProtocol(session.characteristics, {
+      trumaProtocol = retained?.protocol ?? new TrumaProtocol(session.characteristics, {
         ...protocol,
         logger: protocol?.logger ?? logger
       });
-      const responses = await trumaProtocol.readAll({ sequence: READ_SEQUENCE });
-      return parseAndLogSettings(responses, { logger, redact });
+      const responses = await trumaProtocol.readAll({ sequence: topologyOnly ? DISCOVERY_SEQUENCE : READ_SEQUENCE });
+      const result = parseAndLogSettings(responses, { logger, redact });
+      success = true;
+      return result;
     } catch (error) {
       lastError = error;
       logger(`Discovery attempt ${attempt} failed: ${errorMessage(error)}.`);
@@ -170,8 +204,8 @@ export async function discover({
       if (attempt >= readRetries || !isRetryableReadError(error)) throw error;
       logger('Disconnecting and retrying the full BLE/protocol session.');
     } finally {
-      trumaProtocol?.close();
-      await disconnectQuietly(session.peripheral);
+      if (connection) await connection.release(success);
+      else { trumaProtocol?.close(); await disconnectQuietly(session.peripheral); }
     }
 
     await delay(1500);
@@ -180,83 +214,58 @@ export async function discover({
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+export interface SetResult extends SettingsJson {
+  write: { status: 'confirmed'; topic: string; parameter: string; targetGroup: number };
+}
+
 export async function set({
-  protocol,
-  redact = true,
-  logger = () => {},
-  readRetries = 1,
-  targetGroup,
-  topic,
-  parameter,
-  value,
-  ...connectOptions
-}: SetOptions): Promise<SettingsJson> {
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= readRetries; attempt += 1) {
-    logger(`Starting Truma parameter write (attempt ${attempt}/${readRetries}).`);
-    const session = await connectToTruma({ ...connectOptions, logger });
-    let trumaProtocol: TrumaProtocol | null = null;
-
-    try {
-      const softwareRevision = await readSoftwareRevision(session.characteristics);
-      logger(`Software revision: ${softwareRevision || '<not available>'}.`);
-
-      trumaProtocol = new TrumaProtocol(session.characteristics, {
-        ...protocol,
-        logger: protocol?.logger ?? logger
-      });
-
-      logger('Initializing protocol and learning assigned client address before writing.');
-      await trumaProtocol.initializeClientAddress();
-      logger(`Writing ${topic}.${parameter}=${summarizeDecoded(value)} to ${formatDeviceGroup(targetGroup)}.`);
-      const responses = await trumaProtocol.writeParameter({
-        targetGroup,
-        topicName: topic,
-        parameterName: parameter,
-        value
-      });
-      return parseAndLogSettings(responses, { logger, redact, topics: [topic] });
-    } catch (error) {
-      lastError = error;
-      logger(`Write attempt ${attempt} failed: ${errorMessage(error)}.`);
-      const partialResponses = trumaProtocol?.getResponseBuffers() ?? [];
-      if (partialResponses.length > 0) {
-        logger(`Returning partial JSON from ${partialResponses.length} collected response payload(s).`);
-        return parseAndLogSettings(partialResponses, { logger, redact, topics: [topic] });
-      }
-      if (attempt >= readRetries || !isRetryableReadError(error)) throw error;
-      logger('Disconnecting and retrying the full BLE/protocol session.');
-    } finally {
-      trumaProtocol?.close();
-      await disconnectQuietly(session.peripheral);
-    }
-
-    await delay(1500);
+  connection, protocol, redact = true, logger = () => {}, readRetries = 1,
+  targetGroup, topic, parameter, value, metadata, ...connectOptions
+}: SetOptions): Promise<SetResult> {
+  validateParameterValue(value, metadata, `${topic}.${parameter}`);
+  if (readRetries > 1) logger('Writes are sent once; automatic write retries are disabled to avoid repeating an uncertain operation.');
+  const retained = connection ? await connection.acquire({ ...connectOptions, logger }, { ...protocol, logger: protocol?.logger ?? logger }) : null;
+  const session = retained?.session ?? await connectToTruma({ ...connectOptions, logger });
+  let trumaProtocol: TrumaProtocol | null = null;
+  let success = false;
+  try {
+    trumaProtocol = retained?.protocol ?? new TrumaProtocol(session.characteristics, { ...protocol, logger: protocol?.logger ?? logger });
+    await trumaProtocol.initializeClientAddress();
+    const responses = await trumaProtocol.writeParameter({ targetGroup, topicName: topic, parameterName: parameter, value });
+    const result: SetResult = {
+      ...parseAndLogSettings(responses, { logger, redact, topics: [topic] }),
+      write: { status: 'confirmed', topic, parameter, targetGroup }
+    };
+    success = true;
+    return result;
+  } finally {
+    if (connection) await connection.release(success);
+    else { trumaProtocol?.close(); await disconnectQuietly(session.peripheral); }
   }
-
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 export async function pair({
   protocol,
   logger = () => {},
   holdMs = 20000,
+  passkey,
   linuxPairingMethod,
   linuxAgent = process.platform === 'linux',
-  linuxAgentCapability = 'NoInputNoOutput',
-  linuxLegacyPairing = false,
+  linuxAgentCapability = passkey === undefined ? 'NoInputNoOutput' : 'KeyboardDisplay',
+  linuxLegacyPairing,
   linuxLegacyPowerCycle = false,
   linuxDisablePrivacy = false,
   ...connectOptions
 }: PairOptions = {}): Promise<PairTrumaResult> {
+  validatePairingCode(passkey);
   logger('Starting Truma pairing trigger.');
   const bluetooth = connectOptions.bluetooth ?? 'auto';
-  const selectedPairingMethod = linuxPairingMethod ?? (bluetooth === 'bluez' || (bluetooth === 'auto' && (await isBluezAvailable(logger))) ? 'bluez' : 'noble-trigger');
+  if (connectOptions.adapter && bluetooth === 'noble') throw new Error('Adapter selection requires the BlueZ backend.');
+  const selectedPairingMethod = linuxPairingMethod ?? (connectOptions.adapter || bluetooth === 'bluez' || (bluetooth === 'auto' && (await isBluezAvailable(logger))) ? 'bluez' : 'noble-trigger');
   if (selectedPairingMethod === 'bluez') {
-    const useLegacyPairing = linuxLegacyPairing || bluetooth === 'bluez' || bluetooth === 'auto';
+    const useLegacyPairing = linuxLegacyPairing ?? (passkey === undefined && (bluetooth === 'bluez' || bluetooth === 'auto'));
     return pairTrumaWithBluez({
-      logger,
+      logger, passkey, adapterSelector: connectOptions.adapter, deviceName: connectOptions.deviceName, deviceAddress: connectOptions.deviceAddress,
       holdMs,
       linuxAgent,
       linuxAgentCapability,
@@ -269,18 +278,21 @@ export async function pair({
     });
   }
 
+  if (passkey !== undefined || connectOptions.adapter) throw new Error('Pairing codes and adapter selection require BlueZ pairing.');
   const legacyPairing = await startLinuxPairingControllerTweaks({
     enabled: linuxLegacyPairing || linuxDisablePrivacy,
-    legacyPairing: linuxLegacyPairing,
+    legacyPairing: linuxLegacyPairing ?? false,
     disablePrivacy: linuxDisablePrivacy,
     powerCycle: linuxLegacyPowerCycle,
     logger
   });
-  const agent = await startLinuxPairingAgent({ enabled: linuxAgent, capability: linuxAgentCapability, logger });
-  const session = await connectToTruma({ ...connectOptions, logger });
+  let agent: Awaited<ReturnType<typeof startLinuxPairingAgent>> | null = null;
+  let session: Awaited<ReturnType<typeof connectToTruma>> | null = null;
   let trumaProtocol: TrumaProtocol | null = null;
 
   try {
+    agent = await startLinuxPairingAgent({ enabled: linuxAgent, capability: linuxAgentCapability, logger });
+    session = await connectToTruma({ ...connectOptions, logger });
     trumaProtocol = new TrumaProtocol(session.characteristics, {
       ...protocol,
       logger: protocol?.logger ?? logger
@@ -298,8 +310,8 @@ export async function pair({
     };
   } finally {
     trumaProtocol?.close();
-    await disconnectQuietly(session.peripheral);
-    await agent.stop();
+    if (session) await disconnectQuietly(session.peripheral);
+    await agent?.stop();
     await legacyPairing.stop();
   }
 }
@@ -331,7 +343,7 @@ export async function prepareVictronBluez({
 }
 
 async function pairTrumaWithBluez({
-  logger,
+  logger, passkey, adapterSelector, deviceName, deviceAddress,
   holdMs,
   linuxAgent,
   linuxAgentCapability,
@@ -343,6 +355,10 @@ async function pairTrumaWithBluez({
   timeoutMs = 30000
 }: {
   logger: NonNullable<ConnectOptions['logger']>;
+  passkey?: string;
+  adapterSelector?: string;
+  deviceName?: string;
+  deviceAddress?: string;
   holdMs: number;
   linuxAgent: boolean;
   linuxAgentCapability: LinuxAgentCapability;
@@ -355,7 +371,17 @@ async function pairTrumaWithBluez({
 }): Promise<PairTrumaResult> {
   if (process.platform !== 'linux') throw new Error('BlueZ D-Bus pairing is only available on Linux.');
 
+  const selectionBus = loadDbusNext().systemBus();
+  let adapterPath: string;
+  try {
+    const object = await selectionBus.getProxyObject('org.bluez', '/');
+    const manager = object.getInterface('org.freedesktop.DBus.ObjectManager') as BluezObjectManager;
+    const selected = findBluezAdapterPath(await manager.GetManagedObjects(), adapterSelector);
+    if (!selected) throw new Error('No BlueZ adapter found.');
+    adapterPath = selected;
+  } finally { selectionBus.disconnect(); }
   const controllerTweaks = await startLinuxPairingControllerTweaks({
+    adapterIndex: adapterPath.split('/').pop()!.slice(3),
     enabled: linuxLegacyPairing || linuxDisablePrivacy,
     legacyPairing: linuxLegacyPairing,
     disablePrivacy: linuxDisablePrivacy,
@@ -363,7 +389,7 @@ async function pairTrumaWithBluez({
     logger
   });
   try {
-    const bluez = await bluezPairTruma({ logger, namePrefix, serviceUuid: matchServiceUuid, timeoutMs, agentCapability: linuxAgentCapability });
+    const bluez = await bluezPairTruma({ logger, passkey, adapterPath, deviceName, deviceAddress, namePrefix, serviceUuid: matchServiceUuid, timeoutMs, agentCapability: linuxAgentCapability });
     logger(`BlueZ pair completed. Holding for ${holdMs}ms so bluetoothd can flush bond state.`);
     await delay(holdMs);
     return {
@@ -379,13 +405,17 @@ async function pairTrumaWithBluez({
 }
 
 async function bluezPairTruma({
-  logger,
+  logger, passkey, adapterPath, deviceName, deviceAddress,
   namePrefix,
   serviceUuid,
   timeoutMs,
   agentCapability
 }: {
   logger: NonNullable<ConnectOptions['logger']>;
+  passkey?: string;
+  adapterPath: string;
+  deviceName?: string;
+  deviceAddress?: string;
   namePrefix: string;
   serviceUuid: string | null;
   timeoutMs: number;
@@ -395,17 +425,15 @@ async function bluezPairTruma({
   const bus = systemBus();
   const normalizedServiceUuid = serviceUuid ? normalizeCompactUuid(serviceUuid) : undefined;
   const canonicalServiceUuid = normalizedServiceUuid ? formatCanonicalUuid(normalizedServiceUuid) : undefined;
+  let pairedDevice: BluezDevice | null = null;
   let agent: { path: string; iface: BluezServiceInterface; stop: () => Promise<void> } | null = null;
 
   try {
     const objectManagerObject = await bus.getProxyObject('org.bluez', '/');
     const objectManager = objectManagerObject.getInterface('org.freedesktop.DBus.ObjectManager') as BluezObjectManager;
     const objects = await objectManager.GetManagedObjects();
-    const adapterPath = findBluezAdapterPath(objects);
-    if (!adapterPath) throw new Error('Could not find a BlueZ adapter via org.bluez ObjectManager.');
 
     logger(`Using BlueZ adapter ${adapterPath}.`);
-    agent = await registerBluezPairingAgent({ bus, Interface, capability: agentCapability, logger });
     const adapterObject = await bus.getProxyObject('org.bluez', adapterPath);
     const adapter = adapterObject.getInterface('org.bluez.Adapter1') as BluezAdapter;
 
@@ -414,12 +442,14 @@ async function bluezPairTruma({
     logger(`BlueZ discovery started. Waiting up to ${timeoutMs}ms for ${namePrefix}.`);
 
     try {
-      const device = await waitForBluezDevice({ objectManager, initialObjects: objects, namePrefix, serviceUuid: canonicalServiceUuid, timeoutMs, logger });
+      const device = await waitForBluezDevice({ objectManager, initialObjects: objects, adapterPath, deviceName, deviceAddress, namePrefix, serviceUuid: canonicalServiceUuid, timeoutMs, logger });
       logger(`BlueZ discovered Truma device ${device.address || '<unknown address>'} at ${device.path}.`);
 
       const deviceObject = await bus.getProxyObject('org.bluez', device.path);
       const properties = deviceObject.getInterface('org.freedesktop.DBus.Properties') as BluezProperties;
       const bluezDevice = deviceObject.getInterface('org.bluez.Device1') as BluezDevice;
+      pairedDevice = bluezDevice;
+      agent = await registerBluezPairingAgent({ bus, Interface, capability: agentCapability, logger, passkey, devicePath: device.path });
 
       if (!(await getBluezBoolean(properties, 'org.bluez.Device1', 'Paired'))) {
         logger('Calling BlueZ Device1.Pair().');
@@ -428,6 +458,7 @@ async function bluezPairTruma({
         logger('BlueZ device is already paired.');
       }
 
+      if (await getBluezBoolean(properties, 'org.bluez.Device1', 'Paired') !== true) throw new Error('BlueZ did not confirm pairing.');
       logger('Marking BlueZ device as trusted.');
       await properties.Set('org.bluez.Device1', 'Trusted', new Variant('b', true));
       const paired = await getBluezBoolean(properties, 'org.bluez.Device1', 'Paired');
@@ -439,6 +470,10 @@ async function bluezPairTruma({
       await adapter.StopDiscovery().catch((error: unknown) => logger(`Warning: could not stop BlueZ discovery: ${errorMessage(error)}`));
     }
   } finally {
+    if (pairedDevice) {
+      await pairedDevice.CancelPairing().catch(() => {});
+      await pairedDevice.Disconnect().catch(() => {});
+    }
     if (agent) await agent.stop();
     bus.disconnect();
   }
@@ -455,6 +490,7 @@ async function pairBluezDevice({
   logger: NonNullable<ConnectOptions['logger']>;
   timeoutMs: number;
 }): Promise<void> {
+  let finished = false;
   const pairPromise = device.Pair();
   pairPromise.catch((error: unknown) => {
     logger(`BlueZ Device1.Pair() later returned error: ${errorMessage(error)}`);
@@ -463,7 +499,7 @@ async function pairBluezDevice({
   try {
     const result = await Promise.race([
       pairPromise.then(() => 'method-returned' as const),
-      waitForBluezBooleanProperty(properties, 'org.bluez.Device1', 'Paired', true, timeoutMs).then(() => 'paired-property' as const)
+      waitForBluezBooleanProperty(properties, 'org.bluez.Device1', 'Paired', true, timeoutMs, () => finished).then(() => 'paired-property' as const)
     ]);
     logger(`BlueZ pairing completed via ${result}.`);
   } catch (error) {
@@ -472,6 +508,8 @@ async function pairBluezDevice({
       return;
     }
     throw error;
+  } finally {
+    finished = true;
   }
 }
 
@@ -576,6 +614,8 @@ interface BluezAdapter {
 
 interface BluezDevice {
   Pair(): Promise<void>;
+  CancelPairing(): Promise<void>;
+  Disconnect(): Promise<void>;
 }
 
 interface BluezProperties {
@@ -613,33 +653,33 @@ interface BluezBus {
   disconnect(): void;
 }
 
-function findBluezAdapterPath(objects: BluezObjects): string | null {
-  for (const [path, interfaces] of Object.entries(objects)) {
-    if (interfaces['org.bluez.Adapter1']) return path;
-  }
-  return null;
-}
-
 async function registerBluezPairingAgent({
   bus,
   Interface,
   capability,
-  logger
+  logger, passkey, devicePath
 }: {
   bus: BluezBus;
   Interface: BluezInterfaceConstructor;
   capability: LinuxAgentCapability;
   logger: NonNullable<ConnectOptions['logger']>;
+  passkey?: string;
+  devicePath: string;
 }): Promise<{ path: string; iface: BluezServiceInterface; stop: () => Promise<void> }> {
   const path = '/org/node_red_contrib_truma_inetx/agent';
-  const AgentInterface = createBluezAgentInterface(Interface, logger);
+  const AgentInterface = createBluezAgentInterface(Interface, logger, devicePath, passkey);
   const iface = new AgentInterface();
   bus.export(path, iface);
 
-  const object = await bus.getProxyObject('org.bluez', '/org/bluez');
-  const manager = object.getInterface('org.bluez.AgentManager1') as BluezAgentManager;
-  await manager.RegisterAgent(path, capability);
-  await manager.RequestDefaultAgent(path);
+  let manager: BluezAgentManager;
+  try {
+    const object = await bus.getProxyObject('org.bluez', '/org/bluez');
+    manager = object.getInterface('org.bluez.AgentManager1') as BluezAgentManager;
+    await manager.RegisterAgent(path, capability);
+  } catch (error) {
+    bus.unexport(path, iface);
+    throw error;
+  }
   logger(`Registered in-process BlueZ D-Bus pairing agent ${path} with ${capability} capability.`);
 
   return {
@@ -652,7 +692,10 @@ async function registerBluezPairingAgent({
   };
 }
 
-function createBluezAgentInterface(Interface: BluezInterfaceConstructor, logger: NonNullable<ConnectOptions['logger']>): BluezAgentInterfaceConstructor {
+export function createBluezAgentInterface(Interface: BluezInterfaceConstructor, logger: NonNullable<ConnectOptions['logger']>, devicePath: string, passkey?: string): BluezAgentInterfaceConstructor {
+  validatePairingCode(passkey);
+  const checkDevice = (device: string) => { if (device !== devicePath) throw new Error('Pairing request for a different device was rejected.'); };
+  const requireCode = () => { if (passkey === undefined) throw new Error('Enter the six-digit code shown on the panel and retry pairing.'); return passkey; };
   class TrumaBluezAgent extends Interface {
     constructor() {
       super('org.bluez.Agent1');
@@ -663,32 +706,37 @@ function createBluezAgentInterface(Interface: BluezInterfaceConstructor, logger:
     }
 
     RequestPinCode(device: string): string {
-      logger(`BlueZ agent RequestPinCode for ${device}; returning empty PIN.`);
-      return '';
+      checkDevice(device);
+      return requireCode();
     }
 
-    DisplayPinCode(device: string, pinCode: string): void {
-      logger(`BlueZ agent DisplayPinCode for ${device}: ${pinCode}.`);
+    DisplayPinCode(device: string): void {
+      checkDevice(device);
+      logger('BlueZ requested PIN display; check the panel.');
     }
 
     RequestPasskey(device: string): number {
-      logger(`BlueZ agent RequestPasskey for ${device}; returning 0.`);
-      return 0;
+      checkDevice(device);
+      return Number(requireCode());
     }
 
-    DisplayPasskey(device: string, passkey: number, entered: number): void {
-      logger(`BlueZ agent DisplayPasskey for ${device}: ${passkey} (${entered} entered).`);
+    DisplayPasskey(device: string): void {
+      checkDevice(device);
+      logger('BlueZ requested passkey display; check the panel.');
     }
 
     RequestConfirmation(device: string, passkey: number): void {
-      logger(`BlueZ agent auto-confirming passkey ${passkey} for ${device}.`);
+      checkDevice(device);
+      if (Number(requireCode()) !== passkey) throw new Error('Pairing confirmation code does not match.');
     }
 
     RequestAuthorization(device: string): void {
+      checkDevice(device);
       logger(`BlueZ agent authorizing ${device}.`);
     }
 
     AuthorizeService(device: string, uuid: string): void {
+      checkDevice(device);
       logger(`BlueZ agent authorizing service ${uuid} for ${device}.`);
     }
 
@@ -747,7 +795,7 @@ async function setBluezDiscoveryFilter(
 async function waitForBluezDevice({
   objectManager,
   initialObjects,
-  namePrefix,
+  namePrefix, adapterPath, deviceName, deviceAddress,
   serviceUuid,
   timeoutMs,
   logger
@@ -755,11 +803,14 @@ async function waitForBluezDevice({
   objectManager: BluezObjectManager;
   initialObjects: BluezObjects;
   namePrefix: string;
+  adapterPath: string;
+  deviceName?: string;
+  deviceAddress?: string;
   serviceUuid: string | undefined;
   timeoutMs: number;
   logger: NonNullable<ConnectOptions['logger']>;
 }): Promise<{ path: string; address: string | null }> {
-  const initialMatch = findBluezDevice(initialObjects, { namePrefix, serviceUuid });
+  const initialMatch = findBluezDevice(initialObjects, { adapterPath, deviceName, deviceAddress, namePrefix, serviceUuid });
   if (initialMatch) return initialMatch;
 
   return new Promise((resolve, reject) => {
@@ -769,7 +820,7 @@ async function waitForBluezDevice({
     }, timeoutMs);
 
     const onInterfacesAdded = (path: string, interfaces: Record<string, Record<string, unknown>>) => {
-      const match = findBluezDevice({ [path]: interfaces }, { namePrefix, serviceUuid });
+      const match = findBluezDevice({ [path]: interfaces }, { adapterPath, deviceName, deviceAddress, namePrefix, serviceUuid });
       if (!match) return;
       clearTimeout(timeout);
       objectManager.off('InterfacesAdded', onInterfacesAdded);
@@ -781,19 +832,6 @@ async function waitForBluezDevice({
   });
 }
 
-function findBluezDevice(objects: BluezObjects, { namePrefix, serviceUuid }: { namePrefix: string; serviceUuid: string | undefined }): { path: string; address: string | null } | null {
-  for (const [path, interfaces] of Object.entries(objects)) {
-    const device = interfaces['org.bluez.Device1'];
-    if (!device) continue;
-
-    const name = String(unboxBluezValue(device.Name) || unboxBluezValue(device.Alias) || '');
-    const address = nullableString(unboxBluezValue(device.Address));
-    const uuids = Array.isArray(unboxBluezValue(device.UUIDs)) ? (unboxBluezValue(device.UUIDs) as unknown[]).map((uuid) => String(uuid).toLowerCase()) : [];
-    if (name.startsWith(namePrefix)) return { path, address };
-    if (serviceUuid && uuids.includes(serviceUuid.toLowerCase())) return { path, address };
-  }
-  return null;
-}
 
 async function getBluezBoolean(properties: BluezProperties, interfaceName: string, propertyName: string): Promise<boolean | null> {
   const value = await properties.Get(interfaceName, propertyName).catch(() => null);
@@ -806,10 +844,12 @@ async function waitForBluezBooleanProperty(
   interfaceName: string,
   propertyName: string,
   expected: boolean,
-  timeoutMs: number
+  timeoutMs: number,
+  cancelled: () => boolean = () => false
 ): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
+    if (cancelled()) return;
     if ((await getBluezBoolean(properties, interfaceName, propertyName)) === expected) return;
     await delay(250);
   }
@@ -881,6 +921,7 @@ async function startLinuxPairingAgent({
 }
 
 async function startLinuxPairingControllerTweaks({
+  adapterIndex,
   enabled,
   legacyPairing,
   disablePrivacy,
@@ -888,6 +929,7 @@ async function startLinuxPairingControllerTweaks({
   restore = true,
   logger
 }: {
+  adapterIndex?: string;
   enabled: boolean;
   legacyPairing: boolean;
   disablePrivacy: boolean;
@@ -897,8 +939,9 @@ async function startLinuxPairingControllerTweaks({
 }): Promise<{ started: boolean; stop: () => Promise<void> }> {
   if (process.platform !== 'linux' || !enabled) return { started: false, stop: async () => {} };
 
+  const btmgmt = (args: string[], timeout: number) => runBtmgmt(adapterIndex ? ['--index', adapterIndex, ...args] : args, timeout);
   logger('Applying temporary BlueZ controller pairing settings with btmgmt.');
-  const info = await runBtmgmt(['info'], 3000).catch((error: unknown) => {
+  const info = await btmgmt(['info'], 3000).catch((error: unknown) => {
     throw new Error(`Could not inspect BlueZ controller settings with btmgmt: ${errorMessage(error)}`);
   });
   logger(`Initial btmgmt settings: ${summarizeBtmgmtSettings(info.stdout)}.`);
@@ -906,33 +949,33 @@ async function startLinuxPairingControllerTweaks({
   const hadPrivacy = /(?:current settings|settings):[^\n]*privacy/i.test(info.stdout);
   if (powerCycle) {
     logger('Power-cycling the Bluetooth controller before applying pairing settings.');
-    await runBtmgmt(['power', 'off'], 5000).catch((error: unknown) => {
+    await btmgmt(['power', 'off'], 5000).catch((error: unknown) => {
       throw new Error(`Could not power off Bluetooth controller with "btmgmt power off": ${errorMessage(error)}`);
     });
     await delay(500);
   }
   if (legacyPairing) {
-    await runBtmgmt(['sc', 'off'], 5000).catch((error: unknown) => {
+    await btmgmt(['sc', 'off'], 5000).catch((error: unknown) => {
       throw new Error(`Could not disable BlueZ Secure Connections with "btmgmt sc off": ${errorMessage(error)}`);
     });
     logger(`BlueZ Secure Connections disabled for pairing${hadSecureConnections ? '; it will be restored afterwards' : ''}.`);
   }
   if (disablePrivacy) {
-    await runBtmgmt(['privacy', 'off'], 5000).catch((error: unknown) => {
+    await btmgmt(['privacy', 'off'], 5000).catch((error: unknown) => {
       throw new Error(`Could not disable BlueZ privacy with "btmgmt privacy off": ${errorMessage(error)}`);
     });
     logger(`BlueZ privacy disabled for pairing${hadPrivacy ? '; it will be restored afterwards' : ''}.`);
   }
-  await runBtmgmt(['io-cap', '3'], 5000)
+  await btmgmt(['io-cap', '3'], 5000)
     .then(() => logger('BlueZ controller IO capability set to NoInputNoOutput for pairing.'))
     .catch((error: unknown) => logger(`Warning: could not set BlueZ IO capability with "btmgmt io-cap 3": ${errorMessage(error)}`));
   if (powerCycle) {
-    await runBtmgmt(['power', 'on'], 5000).catch((error: unknown) => {
+    await btmgmt(['power', 'on'], 5000).catch((error: unknown) => {
       throw new Error(`Could not power on Bluetooth controller with "btmgmt power on": ${errorMessage(error)}`);
     });
     await delay(1000);
   }
-  await runBtmgmt(['info'], 3000)
+  await btmgmt(['info'], 3000)
     .then((afterInfo) => logger(`Post-legacy btmgmt settings: ${summarizeBtmgmtSettings(afterInfo.stdout)}.`))
     .catch((error: unknown) => logger(`Warning: could not re-read btmgmt settings: ${errorMessage(error)}`));
 
@@ -941,12 +984,12 @@ async function startLinuxPairingControllerTweaks({
     stop: async () => {
       if (!restore) return;
       if (hadPrivacy && disablePrivacy) {
-        await runBtmgmt(['privacy', 'on'], 5000)
+        await btmgmt(['privacy', 'on'], 5000)
           .then(() => logger('Restored BlueZ privacy with btmgmt.'))
           .catch((error: unknown) => logger(`Warning: could not restore BlueZ privacy with "btmgmt privacy on": ${errorMessage(error)}`));
       }
       if (hadSecureConnections && legacyPairing) {
-        await runBtmgmt(['sc', 'on'], 5000)
+        await btmgmt(['sc', 'on'], 5000)
           .then(() => logger('Restored BlueZ Secure Connections with btmgmt.'))
           .catch((error: unknown) => logger(`Warning: could not restore BlueZ Secure Connections with "btmgmt sc on": ${errorMessage(error)}`));
       }
@@ -975,7 +1018,8 @@ async function runBtmgmt(args: string[], timeoutMs: number): Promise<{ stdout: s
 
 function runInteractiveBtmgmt(args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn('btmgmt', [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const scoped = args[0] === '--index';
+    const child = spawn('btmgmt', scoped ? args.slice(0, 2) : [], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timeout = setTimeout(() => {
@@ -994,7 +1038,7 @@ function runInteractiveBtmgmt(args: string[], timeoutMs: number): Promise<{ stdo
       reject(error);
     });
     child.once('spawn', () => {
-      child.stdin.write(`${args.join(' ')}\n`);
+      child.stdin.write(`${(scoped ? args.slice(2) : args).join(' ')}\n`);
       child.stdin.write('quit\n');
     });
     child.once('exit', (code) => {
@@ -1121,4 +1165,8 @@ async function waitForBluetoothctlLine(
 
   const recent = monitor.lines.slice(-8).join(' | ') || '<no bluetoothctl output>';
   throw new Error(`Timed out after ${timeoutMs}ms waiting for bluetoothctl command "${command}" to succeed.${lastFailure ? ` Last failure: ${lastFailure}.` : ''} Recent output: ${recent}`);
+}
+
+export function validatePairingCode(passkey?: string): void {
+  if (passkey !== undefined && (typeof passkey !== 'string' || !/^\d{6}$/.test(passkey))) throw new Error('Pairing code must contain exactly six digits.');
 }
