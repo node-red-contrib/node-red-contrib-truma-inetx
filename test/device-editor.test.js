@@ -17,7 +17,7 @@ function editor(confirm = true) {
     }
     text(value) { this.label = value; return this; }
     attr(key, value) { if (value === undefined) return this.attrs[key]; this.attrs[key] = value; return this; }
-    prop(key, value) { this.attrs[key] = value; return this; }
+    prop(key, value) { if (value === undefined) return this.attrs[key] || false; this.attrs[key] = value; return this; }
     on(event, handler) { this.handlers[event] = handler; return this; }
     toggle(value) { this.visible = value; return this; }
     trigger(event) { this.handlers[event]?.(); return this; }
@@ -37,7 +37,7 @@ function editor(confirm = true) {
   }
   function request(options) {
     const callbacks = {};
-    const result = { options, resolve(value) { callbacks.done?.(value); callbacks.always?.(); } };
+    const result = { options, resolve(value) { callbacks.done?.(value); callbacks.always?.(); }, reject(error) { callbacks.fail?.({ responseJSON: { error } }); callbacks.always?.(); } };
     for (const name of ['done', 'fail', 'always']) result[name] = (fn) => { callbacks[name] = fn; return result; };
     requests.push(result); return result;
   }
@@ -56,24 +56,70 @@ function editor(confirm = true) {
   return { field, requests, confirmations };
 }
 
-test('editor forget requires confirmation and sends the exact adapter and address', () => {
-  const canceled = editor(false);
-  canceled.field('forget').handlers.click();
-  assert.deepEqual(canceled.requests.map((req) => req.options.url).sort(), ['truma-inetx/adapters', 'truma-inetx/timezones']); // Read-only lists; no mutation.
-  const { field, requests, confirmations } = editor();
-  field('forget').handlers.click();
-  assert.match(confirmations[0], /FC:A8:9B:57:E6:C1.*hci1/);
-  const req = requests.at(-1);
+const saved = { name: 'Truma', address: 'FC:A8:9B:57:E6:C1', backend: 'bluez', paired: true };
+const other = { name: 'Truma', address: '59:E4:0E:97:5E:85', backend: 'bluez', paired: false };
+function forgetList(ui, devices = [saved, other]) {
+  ui.field('forget').trigger('click');
+  assert.equal(ui.requests.at(-1).options.url, 'truma-inetx/devices');
+  ui.requests.at(-1).resolve(devices);
+}
+function select(ui, device) {
+  ui.field('deviceSelect').val(JSON.stringify({ name: device.name, address: device.address })).trigger('change');
+}
+
+test('forget lists records first; cancellation never removes a bond', () => {
+  const ui = editor(false);
+  forgetList(ui);
+  assert.equal(ui.confirmations.length, 0);
+  assert.equal(ui.field('forget-panel').visible, true);
+  ui.field('forget-device').val(saved.address).trigger('change');
+  ui.field('forget-confirm').trigger('click');
+  assert.equal(ui.requests.some((req) => req.options.url.endsWith('/unpair')), false);
+  ui.field('forget-cancel').trigger('click');
+  assert.equal(ui.field('forget-panel').visible, false);
+  assert.equal(ui.field('deviceAddress').val(), saved.address);
+});
+
+test('forget confirms the chosen record and sends its exact adapter and address', () => {
+  const ui = editor();
+  forgetList(ui);
+  ui.field('forget-device').val(saved.address).trigger('change');
+  ui.field('forget-confirm').trigger('click');
+  assert.match(ui.confirmations[0], /FC:A8:9B:57:E6:C1.*hci1/);
+  const req = ui.requests.at(-1);
   assert.equal(req.options.url, 'truma-inetx/unpair');
-  assert.deepEqual(JSON.parse(req.options.data), { adapter: 'hci1', deviceAddress: 'FC:A8:9B:57:E6:C1' });
-  assert.equal(field('search').attrs.disabled, true);
+  assert.deepEqual(JSON.parse(req.options.data), { adapter: 'hci1', deviceAddress: saved.address });
+  assert.equal(ui.field('search').attrs.disabled, true);
   req.resolve({ status: 'removed' });
-  assert.equal(field('search').attrs.disabled, false);
-  field('search').handlers.click();
-  requests.at(-1).resolve([]);
-  assert.equal(field('targetMode').val(), 'none');
-  assert.equal(field('deviceAddress').val(), '');
-  assert.notEqual(field('deviceSelect').val(), null);
+  assert.equal(ui.field('search').attrs.disabled, false);
+  assert.equal(ui.field('targetMode').val(), 'none');
+  assert.equal(ui.field('deviceAddress').val(), '');
+  assert.equal(ui.field('deviceSelect').val(), 'none');
+});
+
+test('changing adapters invalidates the forget list', () => {
+  const ui = editor();
+  forgetList(ui);
+  ui.field('forget-device').val(saved.address).trigger('change');
+  ui.field('adapter').val('hci0').trigger('change');
+  ui.field('forget-confirm').trigger('click');
+  assert.equal(ui.field('forget-panel').visible, false);
+  assert.equal(ui.confirmations.length, 0);
+});
+
+test('forgetting another record or a failed removal keeps the selected target', () => {
+  const ui = editor();
+  forgetList(ui);
+  ui.field('forget-device').val(other.address).trigger('change');
+  ui.field('forget-confirm').trigger('click');
+  ui.requests.at(-1).resolve({ status: 'removed' });
+  assert.equal(ui.field('deviceAddress').val(), saved.address);
+  forgetList(ui);
+  ui.field('forget-device').val(saved.address).trigger('change');
+  ui.field('forget-confirm').trigger('click');
+  ui.requests.at(-1).reject('Bluetooth unavailable');
+  assert.equal(ui.field('deviceAddress').val(), saved.address);
+  assert.equal(ui.field('forget-panel').visible, true);
 });
 
 test('adapter dropdown labels hardware and converts a saved hci name to its stable MAC', () => {
@@ -89,63 +135,75 @@ test('adapter dropdown labels hardware and converts a saved hci name to its stab
   assert.match(other.field('adapter').options.at(-1).label, /unavailable/);
 });
 
-test('pair button sends no passkey and idle mode reveals the timeout field', () => {
-  const { field, requests } = editor();
-  assert.equal(field('connectionMode').val(), 'request');
-  assert.equal(field('idleTimeoutMinutes').val(), 1);
-  field('pair').handlers.click();
-  assert.equal('passkey' in JSON.parse(requests.at(-1).options.data), false);
-  field('connectionMode').val('idle').trigger('change');
-  assert.equal(field('idle-timeout-row').visible, true);
-  field('connectionMode').val('request').trigger('change');
-  assert.equal(field('idle-timeout-row').visible, false);
+test('opening and searching do not pair; selecting pairs without a passkey', () => {
+  const ui = editor();
+  assert.equal(ui.field('connectionMode').val(), 'request');
+  assert.equal(ui.field('idleTimeoutMinutes').val(), 1);
+  ui.field('search').trigger('click');
+  ui.requests.at(-1).resolve([saved, other]);
+  assert.equal(ui.requests.some((req) => req.options.url.endsWith('/pair')), false);
+  assert.equal(ui.field('deviceAddress').val(), saved.address);
+  assert.deepEqual(ui.field('deviceSelect').allOptions().map((option) => option.label), ['No device selected', 'Truma', 'Truma']);
+  select(ui, other);
+  assert.equal(ui.requests.at(-1).options.url, 'truma-inetx/pair');
+  assert.deepEqual(JSON.parse(ui.requests.at(-1).options.data), { adapter: 'hci1', deviceAddress: other.address });
+  assert.equal(ui.field('deviceAddress').val(), saved.address); // Provisional until pairing succeeds.
+  assert.equal(ui.field('deviceSelect').attrs.disabled, true);
+  ui.requests.at(-1).reject('Pairing failed');
+  assert.equal(ui.field('deviceAddress').val(), saved.address);
+  assert.equal(ui.field('deviceSelect').attrs.disabled, false);
+  assert.equal(JSON.parse(ui.field('deviceSelect').val()).address, saved.address);
+  ui.field('connectionMode').val('idle').trigger('change');
+  assert.equal(ui.field('idle-timeout-row').visible, true);
+  ui.field('connectionMode').val('request').trigger('change');
+  assert.equal(ui.field('idle-timeout-row').visible, false);
 });
 
 test('editor saves the resolved identity returned by pairing a random address', () => {
-  const { field, requests } = editor();
-  field('deviceAddress').val('5A:0D:F1:74:99:FE');
-  field('search').handlers.click();
-  requests.at(-1).resolve([{ address: '5A:0D:F1:74:99:FE', name: 'Truma', paired: false, backend: 'bluez' }]);
-  field('pair').handlers.click();
-  requests.at(-1).resolve({ bluez: { paired: true, address: 'FC:A8:9B:57:E6:C1', name: 'Truma' } });
-  assert.equal(field('deviceAddress').val(), 'FC:A8:9B:57:E6:C1');
-  assert.equal(JSON.parse(field('deviceSelect').val()).address, 'FC:A8:9B:57:E6:C1');
-  assert.equal(field('deviceSelect').allOptions().length, 3); // None + automatic + resolved identity; no old random record.
-  assert.match(field('deviceSelect').allOptions()[2].label, /paired on host/);
+  const ui = editor();
+  ui.field('search').trigger('click');
+  ui.requests.at(-1).resolve([other]);
+  select(ui, other);
+  ui.requests.at(-1).resolve({ bluez: { paired: true, address: saved.address, name: 'Truma iNetX-57E6C1' } });
+  assert.equal(ui.field('deviceAddress').val(), saved.address);
+  assert.equal(JSON.parse(ui.field('deviceSelect').val()).address, saved.address);
+  assert.equal(ui.field('deviceSelect').allOptions().length, 2); // None + resolved identity.
+  assert.equal(ui.field('deviceSelect').allOptions()[1].label, 'Truma iNetX-57E6C1');
+});
+
+test('unconfirmed pairing preserves the previous target', () => {
+  const ui = editor();
+  ui.field('search').trigger('click');
+  ui.requests.at(-1).resolve([other]);
+  select(ui, other);
+  ui.requests.at(-1).resolve({ bluez: { paired: false } });
+  assert.equal(ui.field('deviceAddress').val(), saved.address);
+  assert.equal(JSON.parse(ui.field('deviceSelect').val()).address, saved.address);
 });
 
 for (const status of ['removed', 'not-found']) {
-  test(`editor removes forgotten Bluetooth records (${status}) and clears the saved target`, () => {
-    const { field, requests } = editor();
-    field('search').handlers.click();
-    requests.at(-1).resolve([
-      { name: 'Truma', address: 'FC:A8:9B:57:E6:C1', backend: 'bluez', paired: true },
-      { name: 'Truma', address: '59:E4:0E:97:5E:85', backend: 'bluez', paired: false }
-    ]);
-    field('forget').handlers.click();
-    requests.at(-1).resolve({ status });
-    const groups = field('deviceSelect').options;
-    assert.equal(groups.length, 3); // None, automatic, remaining Bluetooth records.
-    assert.equal(field('deviceSelect').val(), 'none');
-    assert.equal(field('deviceName').val(), '');
-    assert.equal(groups[2].options.length, 1);
-    assert.match(groups[2].options[0].label, /59:E4:0E:97:5E:85/);
-    assert.match(field('search-status').label, /^1 Bluetooth record;/);
-    // Forget must not silently switch the flow to the other panel or automatic selection.
-    assert.equal(field('deviceAddress').val(), '');
-    assert.equal(field('targetMode').val(), 'none');
-    field('deviceSelect').val(groups[2].options[0].attrs.value);
-    field('deviceSelect').handlers.change();
-    assert.equal(field('deviceSelect').allOptions().length, 3);
-    assert.equal(field('deviceAddress').val(), '59:E4:0E:97:5E:85');
+  test(`forget clears only the chosen address (${status}), keeping same-name records`, () => {
+    const ui = editor();
+    ui.field('search').trigger('click');
+    ui.requests.at(-1).resolve([saved, other]);
+    forgetList(ui);
+    ui.field('forget-device').val(saved.address).trigger('change');
+    ui.field('forget-confirm').trigger('click');
+    ui.requests.at(-1).resolve({ status });
+    const options = ui.field('deviceSelect').allOptions();
+    assert.equal(options.length, 2);
+    assert.equal(JSON.parse(options[1].attrs.value).address, other.address);
+    assert.equal(ui.field('deviceSelect').val(), 'none');
+    assert.equal(ui.field('deviceAddress').val(), '');
+    assert.equal(ui.field('targetMode').val(), 'none');
   });
 }
 
 test('editor matches saved targets by address even when the discovered name changes', () => {
   const { field, requests } = editor();
-  field('search').handlers.click();
+  field('search').trigger('click');
   requests.at(-1).resolve([{ name: 'Truma iNetX-57E6C1', address: 'fc:a8:9b:57:e6:c1', backend: 'bluez' }]);
-  assert.equal(field('deviceSelect').allOptions().length, 3);
+  assert.equal(field('deviceSelect').allOptions().length, 2);
   assert.equal(field('deviceName').val(), 'Truma iNetX-57E6C1');
   assert.notEqual(field('deviceSelect').val(), null);
 });

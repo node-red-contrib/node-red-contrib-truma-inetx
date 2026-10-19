@@ -90,22 +90,26 @@ normal `discover`, `get`, or `set`.
 
 ### Headless Venus OS / Victron
 
-Open the `truma-inetx-device` configuration, select the adapter, click **Search**,
-and select your panel. Put the panel in Bluetooth pairing mode and click **Pair**.
+Open the `truma-inetx-device` configuration and select the adapter. Put your panel
+in Bluetooth pairing mode, click **Search**, then select its name. Selecting a
+device starts pairing automatically; opening the editor or searching does not.
 Confirm on the panel if requested. Pairing uses the current
 editor selection, so it can run before deployment. Deploy afterwards and use
 **Reread** to refresh topic names and the device list. Use a Get node to read
 parameter values; it learns missing topic groups within that same connection.
 
 Deleting a Node-RED device configuration does not delete the Linux Bluetooth
-bond. To reset it, select an explicit adapter and device and click **Forget
-pairing**. This immediately removes that host bond and cached device, affecting
+bond. To reset it, select an explicit adapter and click **Forget pairing…**.
+Choose a device from the list, click **Forget selected device**, and confirm.
+Only then are that host bond and cached records removed, affecting
 all flows using the same device on that adapter. It does not remove your phone's
 pairing. You may also need to remove this host on the Truma panel. Search again,
-select the panel's current entry, and pair again.
+select the panel's current entry to pair again. Forgetting a different device
+leaves the current selection unchanged. Update and Deploy to save a cleared selection.
 
-The search list can include cached devices. **Paired on host** describes Linux's
-stored bond, which can remain after deleting pairing on the panel. A stale public
+The search list shows device names and can include cached devices. Linux's
+stored bond can remain after deleting pairing on the panel. The forget list
+also shows addresses so you can distinguish records with the same name. A stale public
 identity address and a new unpaired random address may therefore appear with the
 same name; the name alone does not prove they are the same physical device.
 
@@ -150,8 +154,7 @@ CLI's `--passkey` option; the editor has no code field.
 UTC offset in minutes, including daylight saving time (for example, Germany
 60/120, Auckland 720/780). It defaults to the Node-RED/CLI host timezone.
 In the device editor, leave Timezone blank (or click **Automatic (host)**) to use
-the computer running Node-RED. The editor shows the detected host timezone and
-offers timezone suggestions as you type. **Use browser timezone** copies the
+the computer running Node-RED. The editor offers timezone suggestions as you type. **Use browser timezone** copies the
 timezone of the computer or phone opening the editor into the configuration;
 it stays selected until you change it. This does not change the host OS timezone.
 Override it with an IANA timezone in the device configuration, via CLI

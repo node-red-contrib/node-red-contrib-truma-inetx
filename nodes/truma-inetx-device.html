@@ -2,7 +2,6 @@
   function prepareTrumaTimeZone() {
     var input = $('#node-config-input-timeZone');
     var list = $('#truma-timezones');
-    var status = $('#node-config-input-timeZone-status');
     var browserButton = $('#node-config-input-browser-timeZone');
     var browserZone = '';
     try { browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (_) { /* Manual input remains available. */ }
@@ -16,16 +15,13 @@
         list.append($('<option></option>').val(zone));
       });
     }
-    status.text('Detecting Node-RED host timezone…');
     $.getJSON('truma-inetx/timezones').done(function (result) {
       populate(result.timeZones);
-      input.attr('placeholder', 'Automatic — ' + (result.hostTimeZone || 'Node-RED host timezone'));
-      status.text('Automatic: Node-RED host (' + (result.hostTimeZone || 'timezone name unavailable') + '). Browser: ' + (browserZone || 'unavailable') + '.');
+      input.attr('placeholder', 'Automatic');
     }).fail(function () {
       var zones = [];
       try { if (Intl.supportedValuesOf) zones = Intl.supportedValuesOf('timeZone'); } catch (_) { /* Manual input remains available. */ }
       populate(zones);
-      status.text('Host timezone unavailable. Suggestions use this browser; blank still uses the Node-RED host.');
     });
   }
 
@@ -38,7 +34,7 @@
       connectionMode: { value: 'request' },
       idleTimeoutMinutes: { value: 1, validate: function (value) { return this.connectionMode !== 'idle' || (Number.isFinite(Number(value)) && Number(value) >= 0.1 && Number(value) <= 1440); } },
       timeZone: { value: '', validate: function (value) { try { if (value) new Intl.DateTimeFormat('en', { timeZone: value.trim() }); return true; } catch (_) { return false; } } },
-      targetMode: { value: 'first' },
+      targetMode: { value: 'none' },
       deviceName: { value: '' },
       deviceAddress: { value: '' }
     },
@@ -76,11 +72,7 @@
       }
 
       function deviceLabel(device) {
-        var name = device.name || '<unnamed>';
-        var address = device.address || device.id || 'unknown address';
-        var paired = device.paired === true ? 'paired on host' : device.paired === false ? 'not paired' : 'pairing unknown';
-        var rssi = typeof device.rssi === 'number' ? ', rssi ' + device.rssi : '';
-        return name + ' (' + address + (device.addressType ? ', ' + device.addressType : '') + ', ' + device.backend + ', ' + paired + rssi + ')';
+        return device.name || 'Truma iNet X';
       }
 
       function appendDeviceOption(group, device) {
@@ -95,7 +87,7 @@
         targetMode.val(mode);
         deviceName.val(name || '');
         deviceAddress.val(address || '');
-        deviceSelect.val(mode === 'device' ? deviceValue(name, address) : mode === 'none' ? 'none' : '');
+        deviceSelect.val(mode === 'device' ? deviceValue(name, address) : 'none');
       }
 
       function renderDevices() {
@@ -106,23 +98,14 @@
         });
         deviceSelect.empty();
         deviceSelect.append($('<option></option>').attr('value', 'none').text('No device selected'));
-        deviceSelect.append($('<option></option>').attr('value', '').text('First discovered Truma iNet X'));
         if ((currentName || currentAddress) && !current) {
-          var savedGroup = $('<optgroup></optgroup>').attr('label', 'Saved target only — not a Bluetooth record');
-          var state = searched ? 'not in search results' : 'not checked';
-          savedGroup.append($('<option></option>').attr('value', deviceValue(currentName, currentAddress))
-            .text('Saved address: ' + (currentAddress || currentName) + ' (' + state + ')'));
-          deviceSelect.append(savedGroup);
+          appendDeviceOption(deviceSelect, { name: currentName, address: currentAddress });
         }
-        if (devices.length) {
-          var foundGroup = $('<optgroup></optgroup>').attr('label', 'Bluetooth records (may include cached devices)');
-          devices.forEach(function (device) { appendDeviceOption(foundGroup, device); });
-          deviceSelect.append(foundGroup);
-        }
+        devices.forEach(function (device) { appendDeviceOption(deviceSelect, device); });
         // Keep explicit targets when absent; silently falling back could connect to another panel.
-        if (current) { currentName = current.name; currentAddress = current.address; }
-        setSelected(targetMode.val() || (currentName || currentAddress ? 'device' : 'first'), currentName, currentAddress);
-        if (searched) searchStatus.text(devices.length + ' Bluetooth record' + (devices.length === 1 ? '' : 's') + '; saved target shown separately if absent.');
+        if (current) { currentName = current.name || currentName; currentAddress = current.address; }
+        setSelected(currentName || currentAddress ? 'device' : 'none', currentName, currentAddress);
+        if (searched) searchStatus.text(devices.length ? 'Select your panel to pair and use it.' : 'No devices found. Put the panel in pairing mode and search again.');
       }
 
       deviceSelect.on('change', function () {
@@ -132,23 +115,18 @@
           renderDevices();
           return;
         }
-        if (!selected) {
-          setSelected('first', '', '');
-          renderDevices();
-          return;
-        }
+        if (!selected) return;
         try {
-          var parsed = JSON.parse(selected);
-          setSelected('device', parsed.name, parsed.address);
+          pairSelected(JSON.parse(selected));
+        } catch (_) {
           renderDevices();
-        } catch (error) {
-          setSelected('first', '', '');
         }
       });
 
       searchButton.on('click', function () {
+        closeForgetList();
         setBluetoothBusy(true);
-        searchStatus.text('searching...');
+        searchStatus.text('Searching…');
         $.getJSON('truma-inetx/devices', {
           bluetooth: $('#node-config-input-bluetooth').val(),
           adapter: $('#node-config-input-bluetooth').val() === 'noble' ? '' : $('#node-config-input-adapter').val()
@@ -188,9 +166,22 @@
       });
 
       var adapterInput = $('#node-config-input-adapter');
-      var pairButton = $('#node-config-input-pair');
       var forgetButton = $('#node-config-input-forget');
+      var forgetPanel = $('#node-config-input-forget-panel');
+      var forgetSelect = $('#node-config-input-forget-device');
+      var forgetConfirm = $('#node-config-input-forget-confirm');
+      var forgetAdapter = '';
+      var forgetDevices = [];
       var bluetoothBusy = false;
+      function closeForgetList() {
+        forgetPanel.toggle(false);
+        forgetAdapter = '';
+        forgetDevices = [];
+      }
+      closeForgetList();
+      $('#node-config-input-forget-cancel').on('click', closeForgetList);
+      adapterInput.on('change', closeForgetList);
+      forgetSelect.on('change', function () { forgetConfirm.prop('disabled', !forgetSelect.val()); });
       var pairStatus = $('#node-config-input-pair-status');
       var savedAdapter = this.adapter || adapterInput.val() || '';
       function renderAdapters(adapters, failed) {
@@ -215,51 +206,92 @@
         .fail(function () { renderAdapters([], true); });
       function setBluetoothBusy(busy) {
         bluetoothBusy = busy;
+        forgetConfirm.prop('disabled', busy || !forgetSelect.val());
         searchButton.prop('disabled', busy);
-        pairButton.add(forgetButton).prop('disabled', busy || $('#node-config-input-bluetooth').val() === 'noble');
+        forgetButton.prop('disabled', busy || $('#node-config-input-bluetooth').val() === 'noble');
         deviceSelect.add(adapterInput).add($('#node-config-input-bluetooth')).prop('disabled', busy);
         if (!busy) adapterInput.prop('disabled', $('#node-config-input-bluetooth').val() === 'noble');
       }
       function backendChanged() {
+        closeForgetList();
         var noble = $('#node-config-input-bluetooth').val() === 'noble';
         adapterInput.prop('disabled', noble);
-        pairButton.add(forgetButton).prop('disabled', noble || bluetoothBusy);
+        forgetButton.prop('disabled', noble || bluetoothBusy);
         pairStatus.text(noble ? 'Editor pairing requires BlueZ on Linux.' : '');
       }
       $('#node-config-input-bluetooth').on('change', backendChanged);
       backendChanged();
-      pairButton.on('click', function () {
-        if (!deviceAddress.val()) { pairStatus.text('Search and select a device first.'); return; }
+      function pairSelected(selected) {
+        closeForgetList();
+        if ($('#node-config-input-bluetooth').val() === 'noble') {
+          setSelected('device', selected.name, selected.address);
+          renderDevices();
+          pairStatus.text('Selected. Pair in your computer’s Bluetooth settings before deploying.');
+          return;
+        }
+        if (!selected.address) { renderDevices(); return; }
         setBluetoothBusy(true);
-        pairStatus.text('Pairing… confirm on the panel if requested.');
+        var saveButton = $('#node-config-dialog-ok');
+        var saveWasDisabled = saveButton.prop('disabled');
+        saveButton.prop('disabled', true);
+        pairStatus.text('Pairing… keep the panel in pairing mode and confirm there if requested.');
         $.ajax({
           url: 'truma-inetx/pair', type: 'POST', contentType: 'application/json',
-          data: JSON.stringify({ adapter: adapterInput.val(), deviceAddress: deviceAddress.val() })
+          data: JSON.stringify({ adapter: adapterInput.val(), deviceAddress: selected.address })
         }).done(function (result) {
           if (result.bluez && result.bluez.paired && result.bluez.address) {
-            // BlueZ may resolve a random address to the public identity during pairing.
-            var oldAddress = deviceAddress.val().toLowerCase();
+            // BlueZ can resolve a private address to the bonded identity during pairing.
+            var oldAddress = selected.address.toLowerCase();
             var resolvedAddress = result.bluez.address.toLowerCase();
             devices = devices.filter(function (device) {
               var address = (device.address || '').toLowerCase();
               return address !== oldAddress && address !== resolvedAddress;
             });
-            devices.push({ name: result.bluez.name || deviceName.val(), address: result.bluez.address, backend: 'bluez', paired: true });
-            setSelected('device', result.bluez.name || deviceName.val(), result.bluez.address);
-            renderDevices();
+            var name = result.bluez.name || selected.name;
+            devices.push({ name: name, address: result.bluez.address, backend: 'bluez', paired: true });
+            setSelected('device', name, result.bluez.address);
+            pairStatus.text('Paired. Update and Deploy to use this device.');
+          } else {
+            pairStatus.text('Pairing was not confirmed. Put the panel in pairing mode, then select it again.');
           }
-          pairStatus.text(result.bluez && result.bluez.paired ? 'Paired. Deploy, then reread the device tree.' : 'Pairing triggered; check the panel.');
+          renderDevices();
         }).fail(function (xhr) {
-          pairStatus.text((xhr.responseJSON || {}).error || 'Pairing failed. Check pairing mode and Bluetooth permissions.');
+          // Keep the previous target if pairing the new selection fails.
+          renderDevices();
+          pairStatus.text((xhr.responseJSON || {}).error || 'Pairing failed. Put the panel in pairing mode, then select it again.');
         }).always(function () {
           setBluetoothBusy(false);
+          saveButton.prop('disabled', saveWasDisabled);
         });
-      });
+      }
       forgetButton.on('click', function () {
-        var address = deviceAddress.val();
+        closeForgetList();
         var adapter = adapterInput.val().trim();
-        if (!adapter || !address) { pairStatus.text('Select a specific adapter and device first.'); return; }
-        if (!window.confirm('Forget Bluetooth pairing and cached records for ' + address + ' on adapter ' + adapter + '? This removes the host bond for all flows using this device and clears this editor selection. Update and Deploy to save the cleared selection. You may also need to remove this host on the Truma panel.')) return;
+        if (!adapter) { pairStatus.text('Select an adapter first to list its saved devices.'); return; }
+        setBluetoothBusy(true);
+        pairStatus.text('Loading devices…');
+        $.getJSON('truma-inetx/devices', { bluetooth: 'bluez', adapter: adapter })
+          .done(function (results) {
+            forgetAdapter = adapter;
+            forgetDevices = results.filter(function (device) { return !!device.address; });
+            forgetSelect.empty().append($('<option></option>').attr('value', '').text('Select a device to forget'));
+            forgetDevices.forEach(function (device) {
+              forgetSelect.append($('<option></option>').attr('value', device.address)
+                .text(deviceLabel(device) + ' (' + device.address + ')'));
+            });
+            forgetSelect.val('');
+            forgetPanel.toggle(forgetDevices.length > 0);
+            pairStatus.text(forgetDevices.length ? 'Choose the device to forget, then confirm.' : 'No Bluetooth records found on this adapter.');
+          }).fail(function (xhr) {
+            pairStatus.text((xhr.responseJSON || {}).error || 'Could not load devices.');
+          }).always(function () { setBluetoothBusy(false); });
+      });
+      forgetConfirm.on('click', function () {
+        var adapter = forgetAdapter;
+        var selected = forgetDevices.find(function (device) { return device.address === forgetSelect.val(); });
+        if (bluetoothBusy || !selected || !adapter || adapter !== adapterInput.val()) return;
+        var address = selected.address;
+        if (!window.confirm('Forget ' + deviceLabel(selected) + ' (' + address + ') on adapter ' + adapter + '? This removes its pairing and cached records for all flows using this device. You may also need to remove this host on the Truma panel.')) return;
         setBluetoothBusy(true);
         pairStatus.text('Forgetting pairing…');
         $.ajax({
@@ -267,9 +299,12 @@
           data: JSON.stringify({ adapter: adapter, deviceAddress: address })
         }).done(function (result) {
           devices = devices.filter(function (device) { return (device.address || '').toLowerCase() !== address.toLowerCase(); });
-          setSelected('none', '', '');
+          var cleared = deviceAddress.val().toLowerCase() === address.toLowerCase();
+          if (cleared) setSelected('none', '', '');
           renderDevices();
-          pairStatus.text((result.status === 'not-found' ? 'No stored Bluetooth record found on this adapter.' : 'Host pairing and cached records removed.') + ' Selection cleared. Update and Deploy to save, or Search and select the panel to pair again. A nearby panel can appear again in Search.');
+          closeForgetList();
+          pairStatus.text((result.status === 'not-found' ? 'No stored Bluetooth record found.' : 'Pairing and cached records removed.') +
+            (cleared ? ' Update and Deploy to save the cleared selection.' : '') + ' A nearby panel can appear in Search again.');
         }).fail(function (xhr) {
           pairStatus.text((xhr.responseJSON || {}).error || 'Could not forget pairing.');
         }).always(function () { setBluetoothBusy(false); });
@@ -286,7 +321,7 @@
   </div>
   <div class="form-row">
     <label for="node-config-input-bluetooth"><i class="fa fa-bluetooth"></i> Bluetooth</label>
-    <select id="node-config-input-bluetooth">
+    <select id="node-config-input-bluetooth" style="width:70%;">
       <option value="auto">auto</option>
       <option value="bluez">bluez</option>
       <option value="noble">noble</option>
@@ -294,13 +329,13 @@
   </div>
   <div class="form-row">
     <label for="node-config-input-adapter">Adapter</label>
-    <select id="node-config-input-adapter"><option value="">Automatic</option></select>
+    <select id="node-config-input-adapter" style="width:70%;"><option value="">Automatic</option></select>
   </div>
   <div class="form-row"><label></label><span id="node-config-input-adapter-status"></span>
   </div>
   <div class="form-row">
     <label for="node-config-input-connectionMode">Connection</label>
-    <select id="node-config-input-connectionMode">
+    <select id="node-config-input-connectionMode" style="width:70%;">
       <option value="request">Close after every request</option>
       <option value="idle">Keep open until idle timeout (experimental)</option>
     </select>
@@ -315,7 +350,7 @@
   </div>
   <div class="form-row">
     <label for="node-config-input-timeZone">Timezone</label>
-    <input type="text" id="node-config-input-timeZone" list="truma-timezones" placeholder="Automatic — Node-RED host timezone" aria-describedby="node-config-input-timeZone-status">
+    <input type="text" id="node-config-input-timeZone" list="truma-timezones" placeholder="Automatic" style="width:70%;">
     <datalist id="truma-timezones"></datalist>
   </div>
   <div class="form-row">
@@ -324,16 +359,10 @@
     <button type="button" id="node-config-input-browser-timeZone" class="red-ui-button">Use browser timezone</button>
   </div>
   <div class="form-row">
-    <label></label>
-    <span id="node-config-input-timeZone-status"></span>
-  </div>
-  <div class="form-row">
     <label for="node-config-input-deviceSelect"><i class="fa fa-search"></i> Device</label>
-    <select id="node-config-input-deviceSelect" style="width:60%;">
+    <select id="node-config-input-deviceSelect" style="width:70%;">
       <option value="none">No device selected</option>
-      <option value="">First discovered Truma iNet X</option>
     </select>
-    <button type="button" id="node-config-input-search" class="red-ui-button" style="margin-left:4px;">Search</button>
     <input type="hidden" id="node-config-input-targetMode">
     <input type="hidden" id="node-config-input-deviceName">
     <input type="hidden" id="node-config-input-deviceAddress">
@@ -343,10 +372,22 @@
     <span id="node-config-input-search-status" style="color:#666;"></span>
   </div>
   <div class="form-row">
-    <label>Pairing</label>
-    <button type="button" id="node-config-input-pair" class="red-ui-button">Pair</button>
+    <p style="margin-left:105px;">Put your panel in Bluetooth pairing mode, then Search and select it to pair.</p>
+    <label></label>
+    <button type="button" id="node-config-input-search" class="red-ui-button">Search</button>
+    <button type="button" id="node-config-input-forget" class="red-ui-button">Forget pairing…</button>
   </div>
-  <div class="form-row"><label></label><button type="button" id="node-config-input-forget" class="red-ui-button">Forget pairing</button></div>
+  <div id="node-config-input-forget-panel" style="display:none;">
+    <div class="form-row">
+      <label for="node-config-input-forget-device">Forget device</label>
+      <select id="node-config-input-forget-device" style="width:70%;"></select>
+    </div>
+    <div class="form-row">
+      <label></label>
+      <button type="button" id="node-config-input-forget-confirm" class="red-ui-button" disabled>Forget selected device</button>
+      <button type="button" id="node-config-input-forget-cancel" class="red-ui-button">Cancel</button>
+    </div>
+  </div>
   <div class="form-row"><label></label><span id="node-config-input-pair-status"></span></div>
   <div class="form-row">
     <label><i class="fa fa-sitemap"></i> Device tree</label>
@@ -356,6 +397,6 @@
 </script>
 
 <script type="text/html" data-help-name="truma-inetx-device">
-  <p>Deleting a configuration does not remove its Bluetooth bond. Select an explicit adapter and device, then use Forget pairing to remove the host bond and all cached BlueZ records matching that address on that adapter. This affects all flows using that device on this adapter. Remove the host on the panel too if needed. Forget pairing also clears the editor selection; click Update and Deploy to persist that change. No device selected prevents automatic connections. A nearby panel can be discovered again, including under a different random address; forgetting is not a blocklist. Other addresses are not deleted merely because they have the same name. Search can include cached devices; paired on host describes the stored Linux state.</p>
-  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Reread refreshes topic names and the device list; Get reads parameter values and learns their groups. Use Search to select a visible device. On Linux, put the panel in pairing mode and click Pair. Confirm on the panel if requested. Panels requiring a passkey can still be paired with the CLI. Pair uses the current editor selection; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot. Blank or Automatic (host) uses the timezone of the computer running Node-RED, shown below the field. Type to filter timezone suggestions. Use browser timezone copies the current browser timezone as an explicit setting; it does not follow later browser timezone changes or change the host OS timezone. Daylight saving time is calculated for each request. By default connections close after every request. Idle mode keeps the connection for the selected minutes after the last successful request; each request resets the timer. Failed requests, deployment, and Bluetooth operations for another device release the connection. The phone app can connect once the connection closes.</p>
+  <p>Deleting a configuration does not remove its Bluetooth bond. Select an explicit adapter, open Forget pairing, choose a device from its list and confirm to remove the host bond and all cached BlueZ records matching that address on that adapter. This affects all flows using that device on this adapter. Remove the host on the panel too if needed. Forgetting the currently selected device also clears the editor selection; click Update and Deploy to persist that change. No device selected prevents automatic connections. A nearby panel can be discovered again, including under a different random address; forgetting is not a blocklist. Other addresses are not deleted merely because they have the same name. Search can include cached devices. The forget list includes addresses to distinguish devices with the same name.</p>
+  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Reread refreshes topic names and the device list; Get reads parameter values and learns their groups. On Linux, put the panel in pairing mode, click Search and select it. Selecting a device starts pairing; opening the editor or searching does not. Confirm on the panel if requested. Panels requiring a passkey can still be paired with the CLI. Pairing uses the selected search result; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot. Blank or Automatic (host) uses the timezone of the computer running Node-RED. Type to filter timezone suggestions. Use browser timezone copies the current browser timezone as an explicit setting; it does not follow later browser timezone changes or change the host OS timezone. Daylight saving time is calculated for each request. By default connections close after every request. Idle mode keeps the connection for the selected minutes after the last successful request; each request resets the timer. Failed requests, deployment, and Bluetooth operations for another device release the connection. The phone app can connect once the connection closes.</p>
 </script>
