@@ -299,12 +299,13 @@
     <label for="node-config-input-connectionMode">Connection</label>
     <select id="node-config-input-connectionMode">
       <option value="request">Close after every request</option>
-      <option value="idle">Keep open until idle timeout</option>
+      <option value="idle">Keep open until idle timeout (experimental)</option>
     </select>
   </div>
   <div class="form-row" id="node-config-input-idle-timeout-row">
     <label for="node-config-input-idleTimeoutMinutes">Idle timeout</label>
     <input type="number" id="node-config-input-idleTimeoutMinutes" min="0.1" max="1440" step="0.1" style="width:100px;"> minutes
+    <p style="margin-left:105px;">Some panels may disconnect earlier. Use close after every request if reads are unreliable.</p>
   </div>
   <div class="form-row">
     <label></label><span>Failures close the connection. Your phone can connect once it closes.</span>

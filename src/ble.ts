@@ -642,7 +642,9 @@ async function connectToTrumaBluez({
   const disconnect = () => cleanup ??= (async () => {
     try {
       if (selectedDevice) {
-        await withTimeout(selectedDevice.Disconnect(), DISCONNECT_TIMEOUT_MS, 'BlueZ Device1.Disconnect()');
+        // BlueZ may wait for the controller's supervision timeout to complete
+        // teardown. Keep D-Bus alive for that completion instead of abandoning it.
+        await withTimeout(selectedDevice.Disconnect(), 15000, 'BlueZ Device1.Disconnect()');
         logger('Bluetooth disconnected after request.');
       }
     } catch (error) {

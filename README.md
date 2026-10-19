@@ -111,10 +111,12 @@ same name; the name alone does not prove they are the same physical device.
 
 The **Connection** dropdown defaults to **Close after every request**, so the
 phone can connect between requests. Alternatively, choose **Keep open until idle
-timeout** and set the number of minutes (default 1). Requests reuse the connection
+timeout (experimental)** and set the number of minutes (default 1). Requests reuse the connection
 and reset the idle timer. Failed requests, redeployment, and editor Bluetooth
 operations or requests for another device close it immediately. The phone app
 can connect after the connection closes. The timeout counts from request completion.
+Some panels or Bluetooth adapters may drop a retained connection before the idle
+timeout. Use close-after-request mode if repeated reads become unreliable.
 Pair first: reading an unpaired BlueZ device reports an error instead of opening
 a connection that waits for pairing.
 
