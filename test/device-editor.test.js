@@ -19,6 +19,8 @@ function editor(confirm = true) {
     attr(key, value) { if (value === undefined) return this.attrs[key]; this.attrs[key] = value; return this; }
     prop(key, value) { this.attrs[key] = value; return this; }
     on(event, handler) { this.handlers[event] = handler; return this; }
+    toggle(value) { this.visible = value; return this; }
+    trigger(event) { this.handlers[event]?.(); return this; }
     append(option) { this.options.push(option); return this; }
     empty() { this.options = []; return this; }
     add(other) { return { prop: (key, value) => { this.prop(key, value); other.prop(key, value); return this.add(other); }, add: (third) => ({ prop: (key, value) => { this.prop(key, value); other.prop(key, value); third.prop(key, value); } }) }; }
@@ -72,6 +74,29 @@ test('editor forget requires confirmation and sends the exact adapter and addres
   assert.equal(field('targetMode').val(), 'none');
   assert.equal(field('deviceAddress').val(), '');
   assert.notEqual(field('deviceSelect').val(), null);
+});
+
+test('adapter dropdown labels hardware and converts a saved hci name to its stable MAC', () => {
+  const { field, requests } = editor();
+  requests.find((req) => req.options.url === 'truma-inetx/adapters').resolve([
+    { name: 'hci1', address: '11:22:33:44:55:66', path: '/org/bluez/hci1', powered: true }
+  ]);
+  assert.equal(field('adapter').val(), '11:22:33:44:55:66');
+  assert.equal(field('adapter').options[1].label, 'hci1 (11:22:33:44:55:66)');
+  const other = editor();
+  other.requests.find((req) => req.options.url === 'truma-inetx/adapters').resolve([]);
+  assert.equal(other.field('adapter').val(), 'hci1');
+  assert.match(other.field('adapter').options.at(-1).label, /unavailable/);
+});
+
+test('pair button sends no passkey and idle mode reveals the timeout field', () => {
+  const { field, requests } = editor();
+  field('pair').handlers.click();
+  assert.equal('passkey' in JSON.parse(requests.at(-1).options.data), false);
+  field('connectionMode').val('idle').trigger('change');
+  assert.equal(field('idle-timeout-row').visible, true);
+  field('connectionMode').val('request').trigger('change');
+  assert.equal(field('idle-timeout-row').visible, false);
 });
 
 test('editor saves the resolved identity returned by pairing a random address', () => {

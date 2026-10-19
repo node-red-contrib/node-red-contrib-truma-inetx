@@ -91,9 +91,8 @@ normal `discover`, `get`, or `set`.
 ### Headless Venus OS / Victron
 
 Open the `truma-inetx-device` configuration, select the adapter, click **Search**,
-and select your panel. Put the panel in Bluetooth pairing mode, enter the
-six-digit code if one is shown, and click **Pair**. The pairing code is used for
-that attempt only and is never stored in the flow. Pairing uses the current
+and select your panel. Put the panel in Bluetooth pairing mode and click **Pair**.
+Confirm on the panel if requested. Pairing uses the current
 editor selection, so it can run before deployment. Deploy afterwards and use
 **Reread** to refresh topic names and the device list. Use a Get node to read
 parameter values; it learns missing topic groups within that same connection.
@@ -110,8 +109,12 @@ stored bond, which can remain after deleting pairing on the panel. A stale publi
 identity address and a new unpaired random address may therefore appear with the
 same name; the name alone does not prove they are the same physical device.
 
-Bluetooth closes after each request, including failed connection setup or reads,
-so the phone can connect between requests. There is no idle keep-open period.
+The **Connection** dropdown defaults to **Close after every request**, so the
+phone can connect between requests. Alternatively, choose **Keep open until idle
+timeout** and set the number of minutes (default 1). Requests reuse the connection
+and reset the idle timer. Failed requests, redeployment, and editor Bluetooth
+operations or requests for another device close it immediately. The phone app
+can connect after the connection closes. The timeout counts from request completion.
 Pair first: reading an unpaired BlueZ device reports an error instead of opening
 a connection that waits for pairing.
 
@@ -121,8 +124,10 @@ settings. Panels requiring the older controller preparation can still use the
 CLI pairing path. Pairing and adapter changes need validation on your actual
 panel/firmware; automated tests use simulated devices.
 
-Adapters can be selected by MAC address (recommended, stable across hci
-renumbering), `hci0` / `hci1`, or a BlueZ object path. The same adapter is used for
+The **Adapter** dropdown lists detected hardware as `hci0 (MAC address)` and stores
+the MAC address, which stays stable across hci renumbering. **Automatic** lets the
+backend choose. A saved adapter that is absent remains visible as unavailable.
+The CLI also accepts `hci0` / `hci1` or a BlueZ object path. The same adapter is used for
 discovery, pairing, reading and writing. An explicit missing adapter fails
 instead of silently choosing another. With an adapter selected, `auto` uses
 BlueZ; explicit `noble` requires leaving the adapter blank.
@@ -134,8 +139,8 @@ npm run get -- --adapter hci1 --device-address AA:BB:CC:DD:EE:FF
 npm run pair -- --bluetooth bluez --adapter hci1 --device-address AA:BB:CC:DD:EE:FF --passkey 001234
 ```
 
-A CLI passkey may be saved by shell history; the editor avoids putting it in a
-command. When a code is required, a missing or mismatched code fails pairing.
+A CLI passkey may be saved by shell history. Panels requiring a code can use the
+CLI's `--passkey` option; the editor has no code field.
 
 ### Local time
 

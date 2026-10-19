@@ -116,6 +116,32 @@ test('cleared device selection survives deployment without discovering or connec
   assert.equal(calls, 0);
 });
 
+test('idle connections close before another device or editor action and on node removal', async () => {
+  const events = [];
+  const connections = [];
+  class Connection {
+    constructor(timeout, schedule) { this.timeout = timeout; this.schedule = schedule; connections.push(this); }
+    async close() { events.push(`close:${connections.indexOf(this)}`); }
+  }
+  const { types, routes } = register('truma-inetx-device.js', {
+    TrumaConnection: Connection,
+    discover: async (options) => { events.push(`discover:${connections.indexOf(options.connection)}`); return tree; },
+    discoverTrumaDevices: async () => { events.push('search'); return []; }
+  });
+  const first = new types['truma-inetx-device']({ connectionMode: 'idle', idleTimeoutMinutes: 2 });
+  await first.ready;
+  assert.equal(connections[0].timeout, 120000);
+  const second = new types['truma-inetx-device']({ connectionMode: 'idle' });
+  await second.ready;
+  assert.deepEqual(events, ['discover:0', 'close:0', 'discover:1']);
+  await connections[0].schedule(() => connections[0].close());
+  assert.equal(events.includes('close:1'), false, 'old timer must not disconnect another device');
+  await routes['get /truma-inetx/devices'].handler({ query: {} }, response());
+  assert.deepEqual(events.slice(-2), ['close:1', 'search']);
+  await new Promise((resolve) => first.handlers.close(true, resolve));
+  assert.equal(events.at(-1), 'close:0');
+});
+
 test('device config passes adapter/timezone and retains validation metadata after value-only updates', async () => {
   let options;
   const { types } = register('truma-inetx-device.js', { discover: async (input) => { options = input; return tree; } });

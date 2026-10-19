@@ -10,6 +10,8 @@ import { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, REA
 import { TrumaProtocol, type ReadRequest, type TrumaProtocolOptions } from './protocol.js';
 import { parseSettingsJson, type SettingsJson } from './settings.js';
 import { decodeFirstCbor, type TrumaValue } from './truma-frame.js';
+import { TrumaConnection } from './connection.js';
+export { TrumaConnection };
 
 export { connectToTruma, disconnectQuietly, isBluezAvailable, isTrumaPeripheral, readSoftwareRevision, shutdownBluetooth } from './ble.js';
 export { buildGroupReadSequence, buildTopicReadSequence, DISCOVERY_SEQUENCE, READ_SEQUENCE, TRUMA } from './constants.js';
@@ -29,6 +31,7 @@ export type { CollectedSettings, JsonValue, SettingsJson, SettingsTopicJson, Tru
 export type { TrumaFrame, TrumaFrameHeader, TrumaValue } from './truma-frame.js';
 
 export interface GetTrumaSettingsOptions extends ConnectOptions {
+  connection?: TrumaConnection;
   protocol?: TrumaProtocolOptions;
   redact?: boolean;
   readRetries?: number;
@@ -38,6 +41,7 @@ export interface GetTrumaSettingsOptions extends ConnectOptions {
 }
 
 export interface SetOptions extends ConnectOptions {
+  connection?: TrumaConnection;
   protocol?: TrumaProtocolOptions;
   redact?: boolean;
   readRetries?: number;
@@ -104,6 +108,7 @@ export async function unpair(options: UnpairOptions) {
 }
 
 export async function get({
+  connection,
   protocol,
   redact = true,
   logger = () => {},
@@ -117,14 +122,16 @@ export async function get({
 
   for (let attempt = 1; attempt <= readRetries; attempt += 1) {
     logger(`Starting Truma settings read (attempt ${attempt}/${readRetries}).`);
-    const session = await connectToTruma({ ...connectOptions, logger });
+    const retained = connection ? await connection.acquire({ ...connectOptions, logger }, { ...protocol, logger: protocol?.logger ?? logger }) : null;
+    const session = retained?.session ?? await connectToTruma({ ...connectOptions, logger });
     let trumaProtocol: TrumaProtocol | null = null;
+    let success = false;
 
     try {
       const softwareRevision = await readSoftwareRevision(session.characteristics);
       logger(`Software revision: ${softwareRevision || '<not available>'}.`);
 
-      trumaProtocol = new TrumaProtocol(session.characteristics, {
+      trumaProtocol = retained?.protocol ?? new TrumaProtocol(session.characteristics, {
         ...protocol,
         logger: protocol?.logger ?? logger
       });
@@ -132,7 +139,9 @@ export async function get({
       if (topics?.length) logger(`Reading selected topic(s): ${topics.join(', ')}.`);
       if (groups?.length) logger(`Reading selected device group(s): ${groups.map(formatDeviceGroup).join(', ')}.`);
       const responses = await trumaProtocol.readAll(readSequence ? { sequence: readSequence } : undefined);
-      return parseAndLogSettings(responses, { logger, redact, topics });
+      const result = parseAndLogSettings(responses, { logger, redact, topics });
+      success = true;
+      return result;
     } catch (error) {
       lastError = error;
       logger(`Read attempt ${attempt} failed: ${errorMessage(error)}.`);
@@ -144,8 +153,8 @@ export async function get({
       if (attempt >= readRetries || !isRetryableReadError(error)) throw error;
       logger('Disconnecting and retrying the full BLE/protocol session.');
     } finally {
-      trumaProtocol?.close();
-      await disconnectQuietly(session.peripheral);
+      if (connection) await connection.release(success);
+      else { trumaProtocol?.close(); await disconnectQuietly(session.peripheral); }
     }
 
     await delay(1500);
@@ -155,6 +164,7 @@ export async function get({
 }
 
 export async function discover({
+  connection,
   protocol,
   redact = true,
   logger = () => {},
@@ -166,19 +176,23 @@ export async function discover({
 
   for (let attempt = 1; attempt <= readRetries; attempt += 1) {
     logger(`Starting Truma topology discovery (attempt ${attempt}/${readRetries}).`);
-    const session = await connectToTruma({ ...connectOptions, logger });
+    const retained = connection ? await connection.acquire({ ...connectOptions, logger }, { ...protocol, logger: protocol?.logger ?? logger }) : null;
+    const session = retained?.session ?? await connectToTruma({ ...connectOptions, logger });
     let trumaProtocol: TrumaProtocol | null = null;
+    let success = false;
 
     try {
       const softwareRevision = await readSoftwareRevision(session.characteristics);
       logger(`Software revision: ${softwareRevision || '<not available>'}.`);
 
-      trumaProtocol = new TrumaProtocol(session.characteristics, {
+      trumaProtocol = retained?.protocol ?? new TrumaProtocol(session.characteristics, {
         ...protocol,
         logger: protocol?.logger ?? logger
       });
       const responses = await trumaProtocol.readAll({ sequence: topologyOnly ? DISCOVERY_SEQUENCE : READ_SEQUENCE });
-      return parseAndLogSettings(responses, { logger, redact });
+      const result = parseAndLogSettings(responses, { logger, redact });
+      success = true;
+      return result;
     } catch (error) {
       lastError = error;
       logger(`Discovery attempt ${attempt} failed: ${errorMessage(error)}.`);
@@ -190,8 +204,8 @@ export async function discover({
       if (attempt >= readRetries || !isRetryableReadError(error)) throw error;
       logger('Disconnecting and retrying the full BLE/protocol session.');
     } finally {
-      trumaProtocol?.close();
-      await disconnectQuietly(session.peripheral);
+      if (connection) await connection.release(success);
+      else { trumaProtocol?.close(); await disconnectQuietly(session.peripheral); }
     }
 
     await delay(1500);
@@ -205,24 +219,28 @@ export interface SetResult extends SettingsJson {
 }
 
 export async function set({
-  protocol, redact = true, logger = () => {}, readRetries = 1,
+  connection, protocol, redact = true, logger = () => {}, readRetries = 1,
   targetGroup, topic, parameter, value, metadata, ...connectOptions
 }: SetOptions): Promise<SetResult> {
   validateParameterValue(value, metadata, `${topic}.${parameter}`);
   if (readRetries > 1) logger('Writes are sent once; automatic write retries are disabled to avoid repeating an uncertain operation.');
-  const session = await connectToTruma({ ...connectOptions, logger });
+  const retained = connection ? await connection.acquire({ ...connectOptions, logger }, { ...protocol, logger: protocol?.logger ?? logger }) : null;
+  const session = retained?.session ?? await connectToTruma({ ...connectOptions, logger });
   let trumaProtocol: TrumaProtocol | null = null;
+  let success = false;
   try {
-    trumaProtocol = new TrumaProtocol(session.characteristics, { ...protocol, logger: protocol?.logger ?? logger });
+    trumaProtocol = retained?.protocol ?? new TrumaProtocol(session.characteristics, { ...protocol, logger: protocol?.logger ?? logger });
     await trumaProtocol.initializeClientAddress();
     const responses = await trumaProtocol.writeParameter({ targetGroup, topicName: topic, parameterName: parameter, value });
-    return {
+    const result: SetResult = {
       ...parseAndLogSettings(responses, { logger, redact, topics: [topic] }),
       write: { status: 'confirmed', topic, parameter, targetGroup }
     };
+    success = true;
+    return result;
   } finally {
-    trumaProtocol?.close();
-    await disconnectQuietly(session.peripheral);
+    if (connection) await connection.release(success);
+    else { trumaProtocol?.close(); await disconnectQuietly(session.peripheral); }
   }
 }
 

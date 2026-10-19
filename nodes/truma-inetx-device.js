@@ -1,7 +1,14 @@
 // All config nodes and editor operations share the radio without overlapping sessions.
 let bluetoothQueue = Promise.resolve();
-function withBluetooth(operation) {
-  const run = bluetoothQueue.then(operation);
+let retainedConnection;
+function withBluetooth(operation, owner = null, preserveConnection = false) {
+  const run = bluetoothQueue.then(async () => {
+    if (!preserveConnection && retainedConnection && retainedConnection.owner !== owner) {
+      await retainedConnection.connection.close();
+      retainedConnection = null;
+    }
+    return operation();
+  });
   bluetoothQueue = run.catch(() => {});
   return run;
 }
@@ -17,6 +24,8 @@ module.exports = function registerTrumaDeviceNode(RED) {
     node.bluetooth = config.bluetooth || 'auto';
     node.adapter = (config.adapter || '').trim();
     node.timeZone = (config.timeZone || '').trim();
+    node.connectionMode = config.connectionMode === 'idle' ? 'idle' : 'request';
+    node.idleTimeoutMinutes = Number(config.idleTimeoutMinutes ?? 1);
     node.targetMode = config.targetMode || (config.deviceName || config.deviceAddress ? 'device' : 'first');
     node.deviceName = config.deviceName || '';
     node.deviceAddress = config.deviceAddress || '';
@@ -27,6 +36,19 @@ module.exports = function registerTrumaDeviceNode(RED) {
 
     node.loadLibrary = loadLibrary;
 
+    node.useBluetooth = (operation) => withBluetooth(async () => {
+      const truma = await node.loadLibrary();
+      if (node.connectionMode === 'idle') {
+        if (!Number.isFinite(node.idleTimeoutMinutes) || node.idleTimeoutMinutes < 0.1 || node.idleTimeoutMinutes > 1440) {
+          throw new Error('Bluetooth idle timeout must be between 0.1 and 1440 minutes.');
+        }
+        node.connection ??= new truma.TrumaConnection(node.idleTimeoutMinutes * 60000, (cleanup) => withBluetooth(cleanup, node, true));
+        retainedConnection = { owner: node, connection: node.connection };
+      }
+      try { return await operation(truma); }
+      catch (error) { await node.connection?.close(); throw error; }
+    }, node);
+
     node.requireTarget = () => {
       if (node.targetMode === 'none') throw new Error('No Truma device selected. Search and select a device in its configuration, then deploy.');
     };
@@ -34,6 +56,7 @@ module.exports = function registerTrumaDeviceNode(RED) {
       node.requireTarget();
       return {
         bluetooth: node.bluetooth,
+        ...(node.connection ? { connection: node.connection } : {}),
         ...(node.adapter ? { adapter: node.adapter } : {}),
         ...(node.timeZone ? { protocol: { timeZone: node.timeZone } } : {}),
         ...(node.targetMode === 'device' && node.deviceName ? { deviceName: node.deviceName } : {}),
@@ -51,8 +74,7 @@ module.exports = function registerTrumaDeviceNode(RED) {
     node.refreshTreeNow = async () => {
       node.requireTarget();
       node.status({ fill: 'yellow', shape: 'ring', text: 'discovering' });
-      const truma = await node.loadLibrary();
-      const discovered = await withBluetooth(() => truma.discover({
+      const discovered = await node.useBluetooth((truma) => truma.discover({
         ...node.connectOptions(),
         topologyOnly: true,
         logger: (message) => node.logDebug(message)
@@ -73,8 +95,7 @@ module.exports = function registerTrumaDeviceNode(RED) {
       const run = node.queue.then(async () => {
         await node.ready;
         node.requireTarget();
-        const truma = await node.loadLibrary();
-        return withBluetooth(() => operation(truma, node.tree));
+        return node.useBluetooth((truma) => operation(truma, node.tree));
       });
       node.queue = run.catch(() => {});
       return run;
@@ -136,8 +157,11 @@ module.exports = function registerTrumaDeviceNode(RED) {
     };
 
     node.on('close', (_removed, done) => {
-      node.loadLibrary()
-        .then((truma) => withBluetooth(() => truma.shutdownBluetooth()))
+      Promise.all([node.ready, node.queue])
+        .then(() => withBluetooth(async () => {
+          await node.connection?.close();
+          if (retainedConnection?.owner === node) retainedConnection = null;
+        }, node, true))
         .catch(() => {})
         .finally(done);
     });

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import test from 'node:test';
-import { connectToTruma, disconnectQuietly, discover, get, TrumaProtocol, TRUMA } from '../dist/index.js';
+import { connectToTruma, disconnectQuietly, discover, get, TrumaConnection, TrumaProtocol, TRUMA } from '../dist/index.js';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const require = createRequire(import.meta.url);
 const dbus = require('dbus-next');
@@ -42,6 +43,58 @@ async function mockBluez({ paired = true, setupError = false, notifyError = fals
   finally { dbus.systemBus = originalBus; Object.defineProperty(process, 'platform', originalPlatform); }
 }
 const options = { bluetooth: 'bluez', adapter: 'hci0', deviceAddress: 'FC:A8:9B:57:E6:C1' };
+
+test('idle mode reuses the session, clears old responses, and closes only after the most recent request', async () => {
+  await mockBluez({}, async (calls) => {
+    const scheduled = [];
+    const connection = new TrumaConnection(1000, async (cleanup) => { scheduled.push(cleanup); });
+    try {
+      const first = await connection.acquire(options);
+      first.protocol.responseBuffers.push(Buffer.from('old'));
+      await connection.release(true);
+      await delay(1100);
+      assert.equal(scheduled.length, 1);
+      const next = await connection.acquire(options);
+      assert.equal(next.session, first.session);
+      assert.equal(next.protocol, first.protocol);
+      assert.equal(next.protocol.getResponseBuffers().length, 0);
+      await scheduled.shift()(); // Expired cleanup queued behind the new request must not close it.
+      assert.deepEqual(calls, ['connect']);
+      await connection.release(true);
+      await delay(1100);
+      await scheduled.shift()();
+      assert.deepEqual(calls, ['connect', 'disconnect', 'close-bus']);
+    } finally { await connection.close(); }
+  });
+});
+
+test('failed reads close retained sessions immediately and the next request reconnects', async () => {
+  await mockBluez({ notifyError: true }, async (calls) => {
+    const connection = new TrumaConnection(60000, (cleanup) => cleanup());
+    try {
+      await assert.rejects(get({ ...options, connection }), /Notification subscription failed/);
+      assert.deepEqual(calls, ['connect', 'disconnect', 'close-bus']);
+      await assert.rejects(get({ ...options, connection }), /Notification subscription failed/);
+      assert.deepEqual(calls, ['connect', 'disconnect', 'close-bus', 'connect', 'disconnect', 'close-bus']);
+    } finally { await connection.close(); }
+  });
+});
+
+test('successful library reads use one retained session and explicit close releases it once', async () => {
+  const original = TrumaProtocol.prototype.readAll;
+  TrumaProtocol.prototype.readAll = async () => [];
+  try {
+    await mockBluez({}, async (calls) => {
+      const connection = new TrumaConnection(60000, (cleanup) => cleanup());
+      try {
+        await get({ ...options, connection });
+        await get({ ...options, connection });
+        assert.deepEqual(calls, ['connect']);
+      } finally { await connection.close(); await connection.close(); }
+      assert.deepEqual(calls, ['connect', 'disconnect', 'close-bus']);
+    });
+  } finally { TrumaProtocol.prototype.readAll = original; }
+});
 
 test('BlueZ disconnects the device before closing D-Bus when service setup fails', async () => {
   await mockBluez({ setupError: true }, async (calls) => {

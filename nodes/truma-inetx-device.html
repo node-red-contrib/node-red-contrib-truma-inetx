@@ -35,6 +35,8 @@
       name: { value: '' },
       bluetooth: { value: 'auto' },
       adapter: { value: '' },
+      connectionMode: { value: 'request' },
+      idleTimeoutMinutes: { value: 1, validate: function (value) { return this.connectionMode !== 'idle' || (Number.isFinite(Number(value)) && Number(value) >= 0.1 && Number(value) <= 1440); } },
       timeZone: { value: '', validate: function (value) { try { if (value) new Intl.DateTimeFormat('en', { timeZone: value.trim() }); return true; } catch (_) { return false; } } },
       targetMode: { value: 'first' },
       deviceName: { value: '' },
@@ -49,6 +51,11 @@
     },
     oneditprepare: function () {
       prepareTrumaTimeZone();
+      function connectionModeChanged() {
+        $('#node-config-input-idle-timeout-row').toggle($('#node-config-input-connectionMode').val() === 'idle');
+      }
+      $('#node-config-input-connectionMode').on('change', connectionModeChanged);
+      connectionModeChanged();
       var nodeId = this.id;
       var deviceSelect = $('#node-config-input-deviceSelect');
       var targetMode = $('#node-config-input-targetMode');
@@ -182,12 +189,27 @@
       var forgetButton = $('#node-config-input-forget');
       var bluetoothBusy = false;
       var pairStatus = $('#node-config-input-pair-status');
-      var pairingCode = $('#node-config-input-pairingCode');
-      $.getJSON('truma-inetx/adapters').done(function (adapters) {
+      var savedAdapter = this.adapter || adapterInput.val() || '';
+      function renderAdapters(adapters, failed) {
+        adapterInput.empty().append($('<option></option>').attr('value', '').text('Automatic'));
+        var selected = savedAdapter;
+        var found = !savedAdapter;
         adapters.forEach(function (adapter) {
-          $('#truma-adapters').append($('<option></option>').val(adapter.address || adapter.name).text(adapter.name + (adapter.powered ? '' : ' (powered off)')));
+          var value = adapter.address || adapter.name;
+          adapterInput.append($('<option></option>').attr('value', value)
+            .text(adapter.name + (adapter.address ? ' (' + adapter.address + ')' : '') + (adapter.powered ? '' : ' — powered off')));
+          if ([adapter.address, adapter.name, adapter.path].some(function (key) { return key && key.toLowerCase() === savedAdapter.toLowerCase(); })) {
+            selected = value;
+            found = true;
+          }
         });
-      }).fail(function () { /* Manual MAC or hci input remains available. */ });
+        if (!found) adapterInput.append($('<option></option>').attr('value', savedAdapter).text(savedAdapter + ' (unavailable)'));
+        adapterInput.val(selected);
+        $('#node-config-input-adapter-status').text(failed ? 'Could not load adapters. Reopen this editor to retry.' : '');
+      }
+      renderAdapters([], false);
+      $.getJSON('truma-inetx/adapters').done(function (adapters) { renderAdapters(adapters, false); })
+        .fail(function () { renderAdapters([], true); });
       function setBluetoothBusy(busy) {
         bluetoothBusy = busy;
         searchButton.prop('disabled', busy);
@@ -205,13 +227,11 @@
       backendChanged();
       pairButton.on('click', function () {
         if (!deviceAddress.val()) { pairStatus.text('Search and select a device first.'); return; }
-        var code = pairingCode.val();
-        if (code && !/^\d{6}$/.test(code)) { pairStatus.text('Enter exactly six digits, or leave blank if no code is shown.'); return; }
         setBluetoothBusy(true);
         pairStatus.text('Pairing… confirm on the panel if requested.');
         $.ajax({
           url: 'truma-inetx/pair', type: 'POST', contentType: 'application/json',
-          data: JSON.stringify({ adapter: adapterInput.val(), deviceAddress: deviceAddress.val(), passkey: code })
+          data: JSON.stringify({ adapter: adapterInput.val(), deviceAddress: deviceAddress.val() })
         }).done(function (result) {
           if (result.bluez && result.bluez.paired && result.bluez.address) {
             // BlueZ may resolve a random address to the public identity during pairing.
@@ -229,7 +249,6 @@
         }).fail(function (xhr) {
           pairStatus.text((xhr.responseJSON || {}).error || 'Pairing failed. Check pairing mode and Bluetooth permissions.');
         }).always(function () {
-          pairingCode.val('');
           setBluetoothBusy(false);
         });
       });
@@ -272,12 +291,23 @@
   </div>
   <div class="form-row">
     <label for="node-config-input-adapter">Adapter</label>
-    <input type="text" id="node-config-input-adapter" list="truma-adapters" placeholder="Automatic (BlueZ: MAC address or hci0)">
-    <datalist id="truma-adapters"></datalist>
+    <select id="node-config-input-adapter"><option value="">Automatic</option></select>
+  </div>
+  <div class="form-row"><label></label><span id="node-config-input-adapter-status"></span>
   </div>
   <div class="form-row">
-    <label>Connection</label>
-    <span>Close after every request (including failed reads).</span>
+    <label for="node-config-input-connectionMode">Connection</label>
+    <select id="node-config-input-connectionMode">
+      <option value="request">Close after every request</option>
+      <option value="idle">Keep open until idle timeout</option>
+    </select>
+  </div>
+  <div class="form-row" id="node-config-input-idle-timeout-row">
+    <label for="node-config-input-idleTimeoutMinutes">Idle timeout</label>
+    <input type="number" id="node-config-input-idleTimeoutMinutes" min="0.1" max="1440" step="0.1" style="width:100px;"> minutes
+  </div>
+  <div class="form-row">
+    <label></label><span>Failures close the connection. Your phone can connect once it closes.</span>
   </div>
   <div class="form-row">
     <label for="node-config-input-timeZone">Timezone</label>
@@ -309,8 +339,7 @@
     <span id="node-config-input-search-status" style="color:#666;"></span>
   </div>
   <div class="form-row">
-    <label for="node-config-input-pairingCode">Pairing code</label>
-    <input type="password" id="node-config-input-pairingCode" inputmode="numeric" maxlength="6" autocomplete="off" placeholder="Six digits if required" style="width:45%;">
+    <label>Pairing</label>
     <button type="button" id="node-config-input-pair" class="red-ui-button">Pair</button>
   </div>
   <div class="form-row"><label></label><button type="button" id="node-config-input-forget" class="red-ui-button">Forget pairing</button></div>
@@ -324,5 +353,5 @@
 
 <script type="text/html" data-help-name="truma-inetx-device">
   <p>Deleting a configuration does not remove its Bluetooth bond. Select an explicit adapter and device, then use Forget pairing to remove the host bond and all cached BlueZ records matching that address on that adapter. This affects all flows using that device on this adapter. Remove the host on the panel too if needed. Forget pairing also clears the editor selection; click Update and Deploy to persist that change. No device selected prevents automatic connections. A nearby panel can be discovered again, including under a different random address; forgetting is not a blocklist. Other addresses are not deleted merely because they have the same name. Search can include cached devices; paired on host describes the stored Linux state.</p>
-  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Reread refreshes topic names and the device list; Get reads parameter values and learns their groups. Use Search to select a visible device. On Linux, put the panel in pairing mode, enter its six-digit code if shown, and click Pair. The code is used once and never saved in the flow. Pair uses the current editor selection; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot. Blank or Automatic (host) uses the timezone of the computer running Node-RED, shown below the field. Type to filter timezone suggestions. Use browser timezone copies the current browser timezone as an explicit setting; it does not follow later browser timezone changes or change the host OS timezone. Daylight saving time is calculated for each request. Connections close after each operation.</p>
+  <p>Configures a Truma iNet X Bluetooth device and caches the discovered topic tree. Reread refreshes topic names and the device list; Get reads parameter values and learns their groups. Use Search to select a visible device. On Linux, put the panel in pairing mode and click Pair. Confirm on the panel if requested. Panels requiring a passkey can still be paired with the CLI. Pair uses the current editor selection; Reread uses the deployed configuration. BlueZ adapter MAC addresses remain stable when hci numbers change. An explicit adapter requires BlueZ (auto selects it). Leave the adapter blank for noble. The timezone controls SystemTime.Lot. Blank or Automatic (host) uses the timezone of the computer running Node-RED, shown below the field. Type to filter timezone suggestions. Use browser timezone copies the current browser timezone as an explicit setting; it does not follow later browser timezone changes or change the host OS timezone. Daylight saving time is calculated for each request. By default connections close after every request. Idle mode keeps the connection for the selected minutes after the last successful request; each request resets the timer. Failed requests, deployment, and Bluetooth operations for another device release the connection. The phone app can connect once the connection closes.</p>
 </script>
