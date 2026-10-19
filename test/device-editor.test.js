@@ -91,6 +91,8 @@ test('adapter dropdown labels hardware and converts a saved hci name to its stab
 
 test('pair button sends no passkey and idle mode reveals the timeout field', () => {
   const { field, requests } = editor();
+  assert.equal(field('connectionMode').val(), 'request');
+  assert.equal(field('idleTimeoutMinutes').val(), 1);
   field('pair').handlers.click();
   assert.equal('passkey' in JSON.parse(requests.at(-1).options.data), false);
   field('connectionMode').val('idle').trigger('change');

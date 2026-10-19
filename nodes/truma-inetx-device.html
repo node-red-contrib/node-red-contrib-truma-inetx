@@ -51,6 +51,9 @@
     },
     oneditprepare: function () {
       prepareTrumaTimeZone();
+      // Existing flows predate these fields and need visible editor defaults.
+      $('#node-config-input-connectionMode').val(this.connectionMode === 'idle' ? 'idle' : 'request');
+      $('#node-config-input-idleTimeoutMinutes').val(this.idleTimeoutMinutes ?? 1);
       function connectionModeChanged() {
         $('#node-config-input-idle-timeout-row').toggle($('#node-config-input-connectionMode').val() === 'idle');
       }
