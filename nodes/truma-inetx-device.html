@@ -179,7 +179,10 @@
         forgetDevices = [];
       }
       closeForgetList();
-      $('#node-config-input-forget-cancel').on('click', closeForgetList);
+      $('#node-config-input-forget-cancel').on('click', function () {
+        closeForgetList();
+        pairStatus.text('');
+      });
       adapterInput.on('change', closeForgetList);
       forgetSelect.on('change', function () { forgetConfirm.prop('disabled', !forgetSelect.val()); });
       var pairStatus = $('#node-config-input-pair-status');

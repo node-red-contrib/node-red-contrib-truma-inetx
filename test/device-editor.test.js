@@ -77,6 +77,7 @@ test('forget lists records first; cancellation never removes a bond', () => {
   assert.equal(ui.requests.some((req) => req.options.url.endsWith('/unpair')), false);
   ui.field('forget-cancel').trigger('click');
   assert.equal(ui.field('forget-panel').visible, false);
+  assert.equal(ui.field('pair-status').label, '');
   assert.equal(ui.field('deviceAddress').val(), saved.address);
 });
 
